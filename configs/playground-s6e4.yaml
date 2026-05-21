@@ -1,0 +1,42 @@
+# Example config: Kaggle Playground Series S6E4 (the competition the original
+# notebook targeted). Copy this file and edit the few fields that change per
+# competition.
+
+competition: playground-series-s6e4
+
+# --- Problem definition ---
+target: Irrigation_Need          # single string or a list of column names
+id_col: id
+task: classification             # 'classification' or 'regression'
+scoring: balanced_accuracy       # 'balanced_accuracy' or 'roc_auc'
+prediction_aim: category         # 'category' or 'probability'
+
+# --- Feature engineering ---
+# pandas.eval expressions; boolean results are cast to 0/1.
+feature_expressions:
+  - "soil_lt_25  = Soil_Moisture < 25"
+  - "temp_gt_30  = Temperature_C > 30"
+  - "rain_lt_300 = Rainfall_mm < 300"
+  - "wind_gt_10  = Wind_Speed_kmh > 10"
+
+# --- Model search ---
+n_steps: 10                      # number of batches of models to evaluate
+num_models: 100                  # global leaderboard capacity
+step_batch_size: 32              # models evaluated per step (run in parallel)
+n_workers: -1                    # joblib n_jobs (-1 = all cores)
+ensemble_length: 30              # max base models in the final ensemble
+ensemble_min_repr: 1             # minimum kept per model class
+
+# --- Cross-validation ---
+cv_splits: 5
+cv_seed: 42
+
+# --- Runtime ---
+speed_up: false                  # set true to subsample for fast debugging
+max_running_time: 43200          # seconds (Kaggle kernels cap at 12h)
+# Exploratory analysis is a separate command: `kaggle-pipeline analyze -c <this file>`
+seed: null                       # null = non-reproducible
+
+# --- I/O (optional; derived from the environment when omitted) ---
+# data_dir: /path/to/local/data  # required only when running locally
+submission_name: submission
