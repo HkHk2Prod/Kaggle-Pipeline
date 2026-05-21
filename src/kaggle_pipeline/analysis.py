@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from kaggle_pipeline.config import Config, resolve_paths
 from kaggle_pipeline.data import load_datasets
+from kaggle_pipeline.logconfig import configure_logging
 
 
 def analyze(config: Config) -> None:
     """Load the raw train/test data and render plots + reports."""
+    configure_logging()
     paths = resolve_paths(config)
     datasets = load_datasets(config, paths.data_dir)
     # Lazy import keeps matplotlib/seaborn out of the training import path.

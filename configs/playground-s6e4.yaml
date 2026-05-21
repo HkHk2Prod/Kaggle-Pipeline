@@ -5,11 +5,14 @@
 competition: playground-series-s6e4
 
 # --- Problem definition ---
-target: Irrigation_Need          # single string or a list of column names
+# Every field here is optional: omit it (or set it to null) to autodetect it from
+# the data on load. The detected value is printed as a `[autodetect] ...` line.
+target: Irrigation_Need          # string or list of names; null -> last column
 id_col: id
-task: classification             # 'classification' or 'regression'
-scoring: balanced_accuracy       # 'balanced_accuracy' or 'roc_auc'
-prediction_aim: category         # 'category' or 'probability'
+task: classification             # 'classification' or 'regression'; null -> from target dtype
+scoring: balanced_accuracy       # 'balanced_accuracy', 'roc_auc', 'neg_root_mean_squared_error';
+                                 #   null -> roc_auc (binary) / balanced_accuracy (multiclass)
+prediction_aim: category         # 'category' or 'probability'; null -> 'probability' if classification
 
 # --- Feature engineering ---
 # pandas.eval expressions; boolean results are cast to 0/1.
@@ -19,9 +22,21 @@ feature_expressions:
   - "rain_lt_300 = Rainfall_mm < 300"
   - "wind_gt_10  = Wind_Speed_kmh > 10"
 
+# --- Categorical encoding ---
+# How each categorical predictor is encoded *for models that can't consume a raw
+# categorical column* (RandomForest, LogisticRegression). Native-capable models
+# (CatBoost, XGBoost, LightGBM, HistGB) always get the raw column and ignore this
+# map -- "capability wins" -- except HistGB, which encodes columns with more than
+# 255 levels. Columns omitted below default to `frequency`.
+# Strategies: frequency | target | onehot | ordinal | native | drop
+# categorical_encoding:
+#   driver: frequency            # high-cardinality -> one numeric column, not N dummies
+#   region: onehot               # low-cardinality nominal
+#   grade:  ordinal
+
 # --- Model search ---
 n_steps: 10                      # number of batches of models to evaluate
-num_models: 100                  # global leaderboard capacity
+num_models: 300                  # global leaderboard capacity
 step_batch_size: 32              # models evaluated per step (run in parallel)
 n_workers: -1                    # joblib n_jobs (-1 = all cores)
 ensemble_length: 30              # max base models in the final ensemble
@@ -39,4 +54,9 @@ seed: null                       # null = non-reproducible
 
 # --- I/O (optional; derived from the environment when omitted) ---
 # data_dir: /path/to/local/data  # required only when running locally
+# CSV filenames are autodetected by searching data_dir for names containing
+# train / test / sample; set them explicitly only to override that search.
+# train_csv: train.csv
+# test_csv: test.csv
+# sample_csv: sample_submission.csv
 submission_name: submission

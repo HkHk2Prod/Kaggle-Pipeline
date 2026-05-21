@@ -10,9 +10,11 @@ selects the final ensemble members.
 
 from __future__ import annotations
 
+import logging
+import math
 import os
 import pickle
-import random
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +26,8 @@ from kaggle_pipeline.models.base import Model
 
 if TYPE_CHECKING:
     from kaggle_pipeline.context import PipelineContext
+
+logger = logging.getLogger(__name__)
 
 LEADERBOARD_FILENAME = "LeaderBoard"
 
@@ -110,9 +114,23 @@ class LeaderBoard:
         self.seed_seq = seed_seq
         os.makedirs(self.storage_dir, exist_ok=True)
 
-    def add_class(self, name: str, lower: int, upper: int) -> None:
-        self.classes[name] = ModelClass(lower=lower, upper=upper)
+    def add_class(self, name: str, lower: int | float, upper: int | float) -> None:
+        self.classes[name] = ModelClass(
+            lower=self._resolve_bound(lower), upper=self._resolve_bound(upper)
+        )
         self._complexities[name] = 1.0
+
+    def _resolve_bound(self, value: int | float) -> int:
+        """Resolve a capacity bound to an absolute count.
+
+        An ``int`` is taken literally; a ``float`` is a fraction of the
+        leaderboard size (``num_models``), rounded *up* to the next integer. This
+        lets per-class bounds scale with ``num_models`` -- e.g. ``0.05`` means
+        "5% of the board" whether the board holds 100 or 300 models.
+        """
+        if isinstance(value, float):
+            return math.ceil(value * self.num_models)
+        return int(value)
 
     def increase_complexity(self, name: str | None = None, val: float = 0.5) -> None:
         names = self._complexities.keys() if name is None else [name]
@@ -181,11 +199,14 @@ class LeaderBoard:
         self, model: Model, score: float, compute_time: int, class_name: str
     ) -> tuple[str, ModelEntry]:
         now = datetime.now()
-        model_name = class_name + now.strftime("_%Y%m%d_%H%M%S%f")[:-3]
+        # A short random suffix keeps names unique even when several models of the
+        # same class are saved within the same millisecond (parallel workers),
+        # which would otherwise collide and overwrite each other's pickle.
+        model_name = class_name + now.strftime("_%Y%m%d_%H%M%S%f")[:-3] + "_" + uuid.uuid4().hex[:8]
         path = self.storage_dir / model_name
         model.save(path)
         return class_name, ModelEntry(
-            score=score, name=model_name, file_path=path, compute_time=compute_time
+            score=score, name=model_name, file_path=str(path), compute_time=compute_time
         )
 
     def __str__(self) -> str:
@@ -207,10 +228,11 @@ class LeaderBoard:
         Prioritises classes that have not yet reached their lower bound; among
         saturated classes it samples proportionally to a softmax of mean scores.
         The class lookup is shuffled so repeated calls don't always return the
-        first unsatisfied class.
+        first unsatisfied class. All randomness draws from a child of the run's
+        seed sequence, so with a fixed ``seed`` the search is reproducible.
         """
         models: list[str] = []
-        prob: list[float] = []
+        scores: list[float] = []
         rng = np.random.default_rng(self.seed_seq.spawn(1)[0])
         items = list(self.classes.items())
         rng.shuffle(items)
@@ -218,28 +240,34 @@ class LeaderBoard:
             if not cl.is_satisfied():
                 return name
             models.append(name)
-            prob.append(cl.mean_score())
-        prob = np.array(prob, dtype=float)
-        if len(prob) == 0 or np.nanmax(prob) is None:
-            return random.choice(list(self.classes.keys()))
-        temp = prob.std() / 2
-        prob = (prob - prob.mean()) / temp  # normalise to std = 2
-        prob = np.where(np.isnan(prob), np.nanmax(prob), prob)
-        prob = np.exp(prob)
+            # ``mean_score`` is None for an empty class; carried through as NaN
+            # and handled below.
+            scores.append(cl.mean_score())
+        prob = np.array(scores, dtype=float)
+        finite = np.isfinite(prob)
+        # No saturated classes, or none with a usable mean score: pick uniformly.
+        if not finite.any():
+            return str(rng.choice(list(self.classes.keys())))
+        # Treat any missing class mean as the lowest score so it is least likely.
+        prob = np.where(finite, prob, prob[finite].min())
+        spread = prob.std()
+        if spread == 0:  # all means equal -> softmax is uniform anyway.
+            return str(rng.choice(models))
+        prob = np.exp((prob - prob.mean()) / (spread / 2))  # normalise to std = 2
         prob = prob / prob.sum()
-        return np.random.choice(models, p=prob)
+        return str(rng.choice(models, p=prob))
 
     def get_best(self, length: int = 20, min_repr: int = 0) -> list[tuple[str, str]]:
         """Select ensemble members: a minimum per class, then top scorers."""
         length = min(length, len(self))
         files: set[tuple[str, str]] = set()
-        print("Picked models (minimal requirement):")
+        logger.info("Picked models (minimal requirement):")
         if min_repr:
             for cl in self.classes.values():
                 for entry in cl.entries[:min_repr]:
                     files.add((entry.name, entry.file_path))
-                    print(f"Score: {entry.score}. Name: {entry.name}")
-        print("Picked models (best score):")
+                    logger.info("Score: %s. Name: %s", entry.score, entry.name)
+        logger.info("Picked models (best score):")
         table = []
         for _name, cl in self.classes.items():
             for entry in cl.entries:
@@ -249,7 +277,7 @@ class LeaderBoard:
         for score, data in table:
             if len(files) >= length:
                 break
-            print(f"Score: {score}. Name: {data[0]}")
+            logger.info("Score: %s. Name: %s", score, data[0])
             files.add(data)
         return list(files)
 
@@ -275,5 +303,9 @@ class LeaderBoard:
             self.__dict__.update(loaded.__dict__)
             self.storage_dir, self.seed_seq = current_storage_dir, current_seed_seq
             return True
-        print(f"Loaded leaderboard was corrupted. Class was {type(loaded)} instead of {type(self)}")
+        logger.warning(
+            "Loaded leaderboard was corrupted. Class was %s instead of %s",
+            type(loaded),
+            type(self),
+        )
         return False

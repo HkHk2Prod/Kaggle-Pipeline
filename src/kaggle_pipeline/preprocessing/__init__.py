@@ -8,6 +8,13 @@ from kaggle_pipeline.preprocessing.columns import (
     make_cat_order,
     split_num_cat,
 )
+from kaggle_pipeline.preprocessing.encoders import (
+    DEFAULT_STRATEGY,
+    ENCODING_STRATEGIES,
+    FrequencyEncoder,
+    categorical_transformer_specs,
+    resolve_encoding_plan,
+)
 from kaggle_pipeline.preprocessing.pipeline import (
     CATEGORICAL_TYPER_STEP,
     build_pretrain_pipeline,
@@ -32,6 +39,11 @@ __all__ = [
     "FeatureEngineer",
     "CategoricalTyper",
     "OrdinalEncoderTransformer",
+    "FrequencyEncoder",
+    "ENCODING_STRATEGIES",
+    "DEFAULT_STRATEGY",
+    "resolve_encoding_plan",
+    "categorical_transformer_specs",
     "build_pretrain_pipeline",
     "CATEGORICAL_TYPER_STEP",
     "build_target_transforms",

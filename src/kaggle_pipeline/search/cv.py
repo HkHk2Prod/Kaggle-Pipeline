@@ -20,16 +20,16 @@ class CrossValScore:
     """Fit/score ``model`` across ``splits`` and attach OOF preds to the model."""
 
     def __init__(self, model: Model, X, y, *, splits, ctx: PipelineContext):
-        self._scores: list[float] = []
+        scores: list[float] = []
         y_oof = np.zeros((len(y), ctx.target_width))
         for train_idx, val_idx in splits:
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
             model.fit(X_train, y_train)
             y_pred = model.predict(X_val)
-            self._scores.append(ctx.scoring_fn(y_val, y_pred))
+            scores.append(ctx.scoring_fn(y_val, y_pred))
             y_oof[val_idx] = y_pred
-        self._scores = np.array(self._scores)
+        self._scores: np.ndarray = np.array(scores)
         # Drop the redundant last probability column for multiclass OOF features.
         if ctx.target_width > 1:
             y_oof = y_oof[:, :-1]

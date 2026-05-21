@@ -53,6 +53,15 @@ class Model(ABC):
     _fit_params: dict[str, Any] = {}
     # Set by the @register_model decorator.
     _model_name: str
+    # Whether the estimator consumes raw categorical columns natively. When True
+    # the model is handed the raw columns and ``Config.categorical_encoding`` is
+    # ignored for it (capability wins). When False the categoricals are encoded
+    # per that config (default: frequency) before reaching the model.
+    handles_categoricals: bool = False
+    # For native handlers with a hard cap on categorical cardinality (sklearn's
+    # HistGradientBoosting caps at ``max_bins`` = 255): columns above this many
+    # levels are encoded instead of passed natively. ``None`` means no cap.
+    native_cardinality_cap: int | None = None
 
     def __init__(
         self,

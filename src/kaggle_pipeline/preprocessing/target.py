@@ -61,10 +61,9 @@ def build_target_transforms(
 
     # --- Classification ---
     if target[0] in ordered_cats:
-        order = ordered_cats[target[0]]
+        order = np.array(ordered_cats[target[0]])
     else:
-        order = train_df[target[0]].dropna().unique()
-    order = np.array(order)
+        order = np.array(train_df[target[0]].dropna().unique())
     mapping = {cat: i for i, cat in enumerate(order)}
 
     def forward(y: pd.DataFrame) -> np.ndarray:

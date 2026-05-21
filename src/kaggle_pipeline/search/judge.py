@@ -9,6 +9,7 @@ decoded test predictions.
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
@@ -20,6 +21,8 @@ from kaggle_pipeline.context import PipelineContext
 from kaggle_pipeline.models import Model, registry
 from kaggle_pipeline.search.cv import CrossValScore
 from kaggle_pipeline.search.leaderboard import LeaderBoard
+
+logger = logging.getLogger(__name__)
 
 
 class Judge:
@@ -74,14 +77,14 @@ class Judge:
         )
 
         for name, entry, msg in results:
-            print(msg)
+            logger.info(msg)
             self.board.add(name, entry)
         self.board.evaluate_models()
 
         timer = time.perf_counter() - timer
         time_spent = time.strftime("%H:%M:%S", time.gmtime(timer))
-        print(self)
-        print(f"Tested a batch of {batch_size} model(s). It took {time_spent}.")
+        logger.info("%s", self)
+        logger.info("Tested a batch of %d model(s). It took %s.", batch_size, time_spent)
         return timer
 
     def construct_df(self, length: int | None = None, min_repr: int | None = None):
@@ -96,12 +99,14 @@ class Judge:
             model = Model.load(path, self.ctx)
             model.fit(self.X, self.y)
             pred = model.predict(self.X_test)
-            if model.oof.ndim > 1:
-                for i in range(model.oof.shape[1]):
-                    ens_train_df[name + f"{i}"] = model.oof[:, i]
+            oof = model.oof
+            assert oof is not None, "loaded model is missing its out-of-fold predictions"
+            if oof.ndim > 1:
+                for i in range(oof.shape[1]):
+                    ens_train_df[name + f"{i}"] = oof[:, i]
                     ens_test_df[name + f"{i}"] = pred[:, i]
             else:
-                ens_train_df[name] = model.oof
+                ens_train_df[name] = oof
                 ens_test_df[name] = pred
         return ens_train_df, ens_test_df
 
@@ -133,6 +138,7 @@ class Judge:
             n_jobs=-1,
             cv=self.splits,
             scoring=self.ctx.config.scoring,
+            random_state=self.ctx.config.seed,
         )
 
         X_ens_train, X_ens_test = self.construct_df()
@@ -141,9 +147,11 @@ class Judge:
         best_score = search.best_score_
         best_index = search.best_index_
         best_std = search.cv_results_["std_test_score"][best_index]
-        print(
-            f"Ensembling is done. Best score: {best_score:.6f} ± {best_std:.6f}, "
-            f"Best params: {search.best_params_}"
+        logger.info(
+            "Ensembling is done. Best score: %.6f ± %.6f, Best params: %s",
+            best_score,
+            best_std,
+            search.best_params_,
         )
         p_pred = search.best_estimator_.predict_proba(X_ens_test)
         return self.ctx.target_transforms.inverse(p_pred)
@@ -153,11 +161,12 @@ class Judge:
 
     def load(self) -> None:
         if self.board.load():
-            print(
-                f"Loading of existing leaderboard is successful. The Leader board is: \n {self} \n\n"
+            logger.info(
+                "Loading of existing leaderboard is successful. The Leader board is: \n %s \n\n",
+                self,
             )
         else:
-            print("Loading failed. New leaderboard is created.\n")
+            logger.info("Loading failed. New leaderboard is created.\n")
 
     def __str__(self) -> str:
         return self.board.__str__()

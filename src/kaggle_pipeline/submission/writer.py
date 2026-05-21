@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
 
 from kaggle_pipeline.context import PipelineContext
+
+logger = logging.getLogger(__name__)
 
 
 def write_submission(ctx: PipelineContext, y: np.ndarray) -> Path:
@@ -23,6 +26,6 @@ def write_submission(ctx: PipelineContext, y: np.ndarray) -> Path:
 
     out_path = ctx.paths.working_dir / f"{ctx.config.submission_name}.csv"
     result.to_csv(out_path, index=False)
-    print(result.head(10))
-    print(f"Submission written to {out_path}")
+    logger.info("%s", result.head(10))
+    logger.info("Submission written to %s", out_path)
     return out_path

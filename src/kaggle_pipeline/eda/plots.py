@@ -55,7 +55,12 @@ def plot_num_vs_num(ctx: EdaContext, ax, x_col: str, y_col: str, n_bins: int = 2
 
 def plot_cat_vs_any(ctx: EdaContext, ax, x: str, y: str, mode: str = "fill") -> None:
     """Stacked/filled histogram of ``x`` coloured by categorical ``y``."""
-    hue_order = list(reversed(ctx.ordered_cats[y]))
+    # Fall back to sorted unique values for columns the typer did not order
+    # (e.g. low-cardinality numerics treated as categorical only for plotting).
+    cats = ctx.ordered_cats.get(y)
+    if cats is None:
+        cats = sorted(ctx.df[y].dropna().unique())
+    hue_order = list(reversed(cats))
     if mode == "fill":
         multiple, stat = "fill", "proportion"
     else:  # 'stack'

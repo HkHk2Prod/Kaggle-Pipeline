@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Sequence
 
 from kaggle_pipeline.config import Config
+from kaggle_pipeline.logconfig import configure_logging
 from kaggle_pipeline.pipeline import run
+
+logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,10 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    configure_logging()
     args = build_parser().parse_args(argv)
     if args.command == "run":
         out_path = run(Config.from_yaml(args.config))
-        print(f"Done. Submission at: {out_path}")
+        logger.info("Done. Submission at: %s", out_path)
         return 0
     if args.command == "analyze":
         from kaggle_pipeline.analysis import analyze

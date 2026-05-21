@@ -14,13 +14,25 @@ from typing import Any
 
 # Default ordering lists for categorical variables. Whenever a categorical
 # column's values are a subset of one of these lists it is treated as ordinal
-# and encoded in this order. EVERYTHING SHOULD BE LOWER CASE.
+# and encoded in this order. Matching is case-insensitive: entries are
+# lower-cased in Config.__post_init__, so they may be written in any case here
+# or in a user-supplied ``order_lists``.
 DEFAULT_ORDER_LISTS: list[list[str]] = [
     ["poor", "average", "good"],
     ["low", "medium", "high"],
     ["easy", "moderate", "hard"],
     ["no", "yes"],
 ]
+
+# Regression is not wired end-to-end yet (no regressor model definitions, and the
+# ensembling/prediction path only handles classification). We fail fast -- both
+# when ``task='regression'`` is set explicitly and when it is autodetected --
+# rather than letting a run proceed to a confusing late failure.
+REGRESSION_NOT_IMPLEMENTED = (
+    "task='regression' is not implemented yet: this pipeline currently only "
+    "supports classification end-to-end. Set task='classification' (or leave it "
+    "unset for a classification target). Regression support is planned."
+)
 
 
 @dataclass
@@ -32,16 +44,30 @@ class Config:
     """
 
     # --- Problem definition -------------------------------------------------
-    competition: str = "playground-series-s6e4"
-    target: list[str] = field(default_factory=lambda: ["target"])
+    # Each field below may be left as ``None`` to have it autodetected from the
+    # training data once it is loaded (see :mod:`kaggle_pipeline.data.autodetect`).
+    # A short message is printed for every value filled in this way, so a sparse
+    # config still produces a reproducible, self-documenting run log.
+    # The competition slug. Optional: on Kaggle, when ``data_dir`` is unset the
+    # data directory is autodetected by scanning the attached inputs for the one
+    # holding train/test CSVs (see :func:`~kaggle_pipeline.config.resolve_paths`).
+    # Set ``competition`` only to disambiguate when several inputs match; it is
+    # also used to derive the default Colab data path.
+    competition: str | None = None
+    # Target column(s). ``None`` -> the last (non-id) column of the train frame.
+    target: list[str] | None = None
     id_col: list[str] = field(default_factory=lambda: ["id"])
-    # 'classification' or 'regression'. This replaces the notebook's implicit
-    # (and buggy) dtype sniffing; the working path is classification.
-    task: str = "classification"
-    # Implemented so far: 'balanced_accuracy', 'roc_auc'.
-    scoring: str = "balanced_accuracy"
-    # Implemented so far: 'category', 'probability'.
-    prediction_aim: str = "category"
+    # 'classification' or 'regression'. ``None`` -> inferred from the target
+    # dtype: non-numeric or low-cardinality integers give classification,
+    # otherwise regression. This replaces the notebook's implicit (and buggy)
+    # dtype sniffing; the working path is classification.
+    task: str | None = None
+    # Implemented so far: 'balanced_accuracy', 'roc_auc', 'neg_root_mean_squared_error'.
+    # ``None`` -> 'roc_auc' for binary targets, 'balanced_accuracy' for multiclass.
+    scoring: str | None = None
+    # Implemented so far: 'category', 'probability'. ``None`` -> 'probability'
+    # when the task is classification.
+    prediction_aim: str | None = None
 
     # --- Feature engineering ------------------------------------------------
     # ``df.eval`` expressions applied by FeatureEngineer, e.g.
@@ -51,10 +77,19 @@ class Config:
     # Max unique values for a numeric column to still be drawn as categorical
     # on EDA graphs. Only affects plotting.
     cat_cutoff: int = 5
+    # How each categorical predictor is encoded *for models that cannot consume a
+    # raw categorical column* (RandomForest, LogisticRegression). Maps a column
+    # name to a strategy in ``ENCODING_STRATEGIES``; columns left out default to
+    # frequency encoding. Capability wins: models that handle categoricals
+    # natively (CatBoost, XGBoost, LightGBM, HistGB) always get the raw column
+    # and ignore this map (HistGB excepted above its native cardinality cap).
+    categorical_encoding: dict[str, str] = field(default_factory=dict)
 
     # --- Model search -------------------------------------------------------
     n_steps: int = 10
-    num_models: int = 100
+    # Leaderboard capacity. Per-class lower/upper bounds given as floats are
+    # read as fractions of this (see @register_model), so the search scales with it.
+    num_models: int = 300
     step_batch_size: int = 32
     n_workers: int = -1
     ensemble_length: int = 30
@@ -71,8 +106,10 @@ class Config:
     speed_up_test_rows: int = 500
     # Global running-time limit in seconds (Kaggle kernels cap at 12h).
     max_running_time: int = 43200
-    # Random seed. ``None`` means non-reproducible (matches the notebook default).
-    seed: int | None = None
+    # Random seed for the whole run. A fixed default makes a run reproducible
+    # (same seed -> same leaderboard and submission); set to ``None`` for
+    # non-reproducible behaviour (the original notebook's default).
+    seed: int | None = 42
 
     # --- I/O ----------------------------------------------------------------
     # When unset these are derived from the environment + ``competition``.
@@ -80,9 +117,11 @@ class Config:
     storage_dir: Path | None = None
     # Kaggle only: a previous notebook's output dir to warm-start models from.
     previous_output_dir: Path | None = None
-    train_csv: str = "train.csv"
-    test_csv: str = "test.csv"
-    sample_csv: str = "sample_submission.csv"
+    # CSV filenames inside ``data_dir``. ``None`` -> found by searching the
+    # directory for files whose names contain 'train' / 'test' / 'sample'.
+    train_csv: str | None = None
+    test_csv: str | None = None
+    sample_csv: str | None = None
     submission_name: str = "submission"
 
     def __post_init__(self) -> None:
@@ -95,6 +134,27 @@ class Config:
             value = getattr(self, attr)
             if value is not None and not isinstance(value, Path):
                 setattr(self, attr, Path(value))
+        # Order-list matching is case-insensitive, so normalise to lower case
+        # here rather than requiring the user to write entries in lower case.
+        self.order_lists = [[str(v).lower() for v in group] for group in self.order_lists]
+        self._validate_categorical_encoding()
+        if self.task == "regression":
+            raise NotImplementedError(REGRESSION_NOT_IMPLEMENTED)
+
+    def _validate_categorical_encoding(self) -> None:
+        """Fail loudly on an unknown encoding strategy (lazy import avoids a cycle)."""
+        from kaggle_pipeline.preprocessing.encoders import ENCODING_STRATEGIES
+
+        bad = {
+            col: strategy
+            for col, strategy in self.categorical_encoding.items()
+            if strategy not in ENCODING_STRATEGIES
+        }
+        if bad:
+            raise ValueError(
+                f"Unknown categorical_encoding strategies {bad}; "
+                f"each must be one of {sorted(ENCODING_STRATEGIES)}."
+            )
 
     @property
     def target_is_num(self) -> bool:

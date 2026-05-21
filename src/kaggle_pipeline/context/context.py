@@ -24,6 +24,7 @@ from kaggle_pipeline.preprocessing import (
     build_target_transforms,
     get_columns,
     get_predictor_names,
+    resolve_encoding_plan,
     split_num_cat,
 )
 from kaggle_pipeline.scoring import ScoringFn, resolve_scoring
@@ -52,6 +53,10 @@ class PipelineContext:
     num_cols_x: list[str]
     cat_cols_x: list[str]
 
+    # Resolved per-column encoding strategy for the categorical predictors, used
+    # by models without native categorical support (default: frequency).
+    categorical_encoding: dict[str, str]
+
     # Target handling.
     target_is_num: bool
     target_transforms: TargetTransforms
@@ -63,6 +68,8 @@ class PipelineContext:
     # --- convenience accessors ------------------------------------------------
     @property
     def target(self) -> list[str]:
+        # Resolved by autodetect before the context is built (never None here).
+        assert self.config.target is not None
         return self.config.target
 
     @property
@@ -90,6 +97,10 @@ def build_context(config: Config, datasets: Datasets, paths: ResolvedPaths) -> P
     splits, target transforms, the scoring function and the seed sequence are
     all computed from the transformed training frame.
     """
+    # These are autodetected (or set) by load_datasets before we get here.
+    assert config.target is not None
+    assert config.scoring is not None
+    assert config.prediction_aim is not None
     pretrain = build_pretrain_pipeline(config)
     train_df = pretrain.fit_transform(datasets.train)
     test_df = pretrain.transform(datasets.test)
@@ -101,6 +112,7 @@ def build_context(config: Config, datasets: Datasets, paths: ResolvedPaths) -> P
     num_cols_x, cat_cols_x = split_num_cat(
         predictor_columns, train_df, cat_cutoff=config.cat_cutoff
     )
+    categorical_encoding = resolve_encoding_plan(config.categorical_encoding, train_df, cat_cols_x)
 
     target_transforms = build_target_transforms(
         train_df,
@@ -123,6 +135,7 @@ def build_context(config: Config, datasets: Datasets, paths: ResolvedPaths) -> P
         cat_cols=cat_cols,
         num_cols_x=num_cols_x,
         cat_cols_x=cat_cols_x,
+        categorical_encoding=categorical_encoding,
         target_is_num=config.target_is_num,
         target_transforms=target_transforms,
         scoring_fn=resolve_scoring(config.scoring),

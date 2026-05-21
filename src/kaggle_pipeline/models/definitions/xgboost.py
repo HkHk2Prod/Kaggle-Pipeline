@@ -11,6 +11,10 @@ from kaggle_pipeline.models.registry import register_model
 
 @register_model(name="XGBClassifier", purposes="single_target_prob_pred")
 class XGBClassifierModel(Model):
+    # Native categorical handling via ``enable_categorical``; capability wins, so
+    # the raw category columns are passed through and ``categorical_encoding`` is unused.
+    handles_categoricals = True
+
     def generate_distribution(self, complexity):
         k = complexity
         return {

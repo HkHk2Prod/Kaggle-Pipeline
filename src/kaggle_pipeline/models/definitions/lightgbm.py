@@ -11,6 +11,9 @@ from kaggle_pipeline.models.registry import register_model
 
 @register_model(name="LGBMClassifier", purposes="single_target_prob_pred")
 class LGBMClassifierModel(Model):
+    # Native categorical handling (ordinal-encoded then ``categorical_feature``);
+    # capability wins, so ``categorical_encoding`` is unused for this model.
+    handles_categoricals = True
     _fit_params = {"model__categorical_feature": "auto"}
 
     def generate_distribution(self, complexity):

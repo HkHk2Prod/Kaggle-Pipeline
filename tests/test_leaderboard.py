@@ -33,6 +33,52 @@ def test_model_class_rejects_worse_when_full(tmp_path):
     assert not (tmp_path / "m_0.3").exists()
 
 
+def test_add_class_resolves_int_and_float_bounds(tmp_path):
+    # int bounds are absolute; float bounds are fractions of num_models.
+    board = LeaderBoard(num_models=300, storage_dir=tmp_path, seed_seq=np.random.SeedSequence(0))
+    board.add_class("frac", lower=0.05, upper=0.30)  # 5% / 30% of 300
+    board.add_class("abs", lower=3, upper=10)  # taken literally
+    assert (board.classes["frac"].lower, board.classes["frac"].upper) == (15, 90)
+    assert (board.classes["abs"].lower, board.classes["abs"].upper) == (3, 10)
+
+
+def test_add_class_rounds_fractions_up(tmp_path):
+    board = LeaderBoard(num_models=100, storage_dir=tmp_path, seed_seq=np.random.SeedSequence(0))
+    board.add_class("rf", lower=0.025, upper=0.105)  # 2.5 -> 3, 10.5 -> 11
+    assert (board.classes["rf"].lower, board.classes["rf"].upper) == (3, 11)
+
+
+def _saturated_board(seed_seq, storage_dir):
+    """Two classes, each above its lower bound, so ``get`` takes the softmax path.
+
+    Class "A" scores well above "B"; a correct softmax should favour "A".
+    """
+    board = LeaderBoard(num_models=100, storage_dir=storage_dir, seed_seq=seed_seq)
+    board.add_class("A", lower=1, upper=5)
+    board.add_class("B", lower=1, upper=5)
+    for score in (0.90, 0.80):
+        board.classes["A"].insert(_entry(score, storage_dir))
+    for score in (0.50, 0.40):
+        board.classes["B"].insert(_entry(score, storage_dir))
+    return board
+
+
+def test_get_is_reproducible_under_same_seed(tmp_path):
+    # Two boards seeded identically must produce the same selection sequence:
+    # the choice draws from the seed sequence, not the global RNG.
+    board1 = _saturated_board(np.random.SeedSequence(123), tmp_path / "a")
+    board2 = _saturated_board(np.random.SeedSequence(123), tmp_path / "b")
+    seq1 = [board1.get() for _ in range(25)]
+    seq2 = [board2.get() for _ in range(25)]
+    assert seq1 == seq2
+
+
+def test_get_softmax_favours_the_higher_scoring_class(tmp_path):
+    board = _saturated_board(np.random.SeedSequence(7), tmp_path)
+    picks = [board.get() for _ in range(300)]
+    assert picks.count("A") > picks.count("B")  # higher mean score -> picked more
+
+
 def test_leaderboard_save_load_preserves_runtime_state(tmp_path):
     seed_a = np.random.SeedSequence(1)
     board = LeaderBoard(num_models=10, storage_dir=tmp_path, seed_seq=seed_a)

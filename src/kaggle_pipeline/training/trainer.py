@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 
 import numpy as np
@@ -9,6 +10,8 @@ from sklearn.model_selection import StratifiedKFold
 
 from kaggle_pipeline.context import PipelineContext
 from kaggle_pipeline.search import Judge
+
+logger = logging.getLogger(__name__)
 
 
 def run_training(ctx: PipelineContext) -> np.ndarray:
@@ -29,10 +32,10 @@ def run_training(ctx: PipelineContext) -> np.ndarray:
     for i in range(config.n_steps):
         compute_time = judge.step()
         judge.save()
-        print(f"{i + 1} steps done out of {config.n_steps}.\n")
+        logger.info("%d steps done out of %d.\n", i + 1, config.n_steps)
         elapsed = time.perf_counter() - start_time
         if elapsed + 3 * compute_time > config.max_running_time:
-            print("We are low on time and stop the training cycle.")
+            logger.info("We are low on time and stop the training cycle.")
             break
 
     return judge.predict()

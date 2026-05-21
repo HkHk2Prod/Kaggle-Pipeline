@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pandas as pd
 
 from kaggle_pipeline.preprocessing import (
@@ -56,3 +58,16 @@ def test_categorical_typer_orders_and_retypes():
     out = typer.fit_transform(df)
     assert isinstance(out["flag"].dtype, pd.CategoricalDtype)
     assert list(out["flag"].cat.categories) == ["no", "yes"]
+
+
+def test_categorical_typer_maps_unseen_levels_to_nan_without_deprecation():
+    # A test-only category (here "maybe") must become NaN without tripping the
+    # pandas deprecation for constructing a Categorical with out-of-dtype values.
+    typer = CategoricalTyper(cat_cutoff=5, cat_order_list=["no", "yes"])
+    typer.fit(pd.DataFrame({"flag": ["yes", "no", "yes"]}))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = typer.transform(pd.DataFrame({"flag": ["yes", "maybe"]}))
+    assert out["flag"].isna().tolist() == [False, True]  # unseen -> NaN
+    assert list(out["flag"].cat.categories) == ["no", "yes"]  # ordering kept
+    assert not any("Constructing a Categorical" in str(w.message) for w in caught)

@@ -31,5 +31,8 @@ jobs:
           .venv/bin/ruff check src tests
           .venv/bin/ruff format --check src tests
 
+      - name: Type-check
+        run: .venv/bin/mypy
+
       - name: Test
-        run: .venv/bin/python -m pytest -q
+        run: .venv/bin/python -m pytest -q --cov=kaggle_pipeline --cov-report=term-missing
