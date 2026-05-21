@@ -119,15 +119,61 @@ for a documented example). The most important fields:
 | --- | --- |
 | `competition` | Used to derive default Kaggle/Colab data paths |
 | `target`, `id_col` | Target and id column name(s) |
-| `task` | `classification` or `regression` (classification is the working path) |
-| `scoring` | `balanced_accuracy` or `roc_auc` |
+| `task` | `classification` (the only implemented path). `regression` raises `NotImplementedError` — see [Regression](#regression). |
+| `scoring` | `balanced_accuracy`, `roc_auc` or `neg_root_mean_squared_error` |
 | `prediction_aim` | `category` or `probability` |
 | `feature_expressions` | `pandas.eval` expressions for new features |
+| `categorical_encoding` | Per-column encoding for non-native models (see below) |
 | `n_steps`, `num_models`, `step_batch_size` | Search budget and leaderboard size |
 | `ensemble_length`, `ensemble_min_repr` | Ensemble size and min models kept per class |
 | `speed_up` | Subsample data for fast debugging |
 | `max_running_time` | Stop the loop before exceeding this many seconds |
+| `train_csv`, `test_csv`, `sample_csv` | CSV filenames within `data_dir` |
 | `data_dir`, `storage_dir` | Override paths (required `data_dir` when running locally) |
+
+### Autodetection
+
+`competition` is the only field you must set. Leave `target`, `task`,
+`scoring`, `prediction_aim` or the CSV filenames unset (or `None`/`null`) and
+they are inferred from the data when it loads — the chosen value is printed as a
+`[autodetect] ...` line so the run is reproducible from its log:
+
+- **CSV filenames** — the first file in `data_dir` whose name contains
+  `train` / `test` / `sample`.
+- **`target`** — the last non-id column of the train frame.
+- **`task`** — `classification` for text or low-cardinality integer targets,
+  `regression` for continuous numeric ones. A `regression` result (autodetected
+  or set explicitly) raises `NotImplementedError` — see [Regression](#regression).
+- **`prediction_aim`** — `probability` for classification.
+- **`scoring`** — `roc_auc` for binary targets, `balanced_accuracy` for
+  multiclass, `neg_root_mean_squared_error` for regression.
+
+So a minimal config can be as short as `Config(competition="…", data_dir="…")`.
+
+### Categorical encoding
+
+High-cardinality categoricals (e.g. a `driver` column with dozens of names) are
+handled per model by capability:
+
+- **Models that handle categoricals natively** — CatBoost, XGBoost, LightGBM and
+  HistGB — are handed the **raw column**. *Capability wins:* `categorical_encoding`
+  is ignored for them. (Exception: HistGB encodes any column above its native
+  255-level cap, since sklearn cannot use more than that natively.)
+- **Models that can't** — RandomForest and LogisticRegression — get the column
+  **encoded** per `categorical_encoding`, defaulting to **frequency encoding**.
+  This replaces one-hot, so a high-cardinality column becomes a single numeric
+  feature instead of one dummy per level (and unseen test levels no longer error).
+
+Set strategies per column; unset columns default to `frequency`:
+
+```yaml
+categorical_encoding:
+  driver: frequency   # frequency | target | onehot | ordinal | native | drop
+  region: onehot
+```
+
+The resolved plan is printed as `[encoding] ...` lines when the data loads, so
+each column's chosen strategy is visible in the run log.
 
 ## Adding a model
 
@@ -152,24 +198,60 @@ applied while packaging:
   loaded model's pipeline with random hyperparameters and never re-applied the
   saved ones, so ensemble members were refit incorrectly. `Model.load` now
   rebuilds the pipeline from the saved parameters.
-- **Task type is explicit** (`task` config) instead of an implicit, fragile
-  dtype check on the target.
+- **Task type is explicit or opt-in autodetected**: set `task` directly, or
+  leave it unset for a deliberate, announced dtype-based inference — replacing
+  the notebook's implicit, silent (and buggy) dtype sniffing.
 
 ## Development
 
 ```bash
 uv pip install --python .venv/bin/python -e ".[dev]"
 .venv/bin/python -m pytest -q          # tests (incl. an end-to-end smoke run)
+.venv/bin/python -m pytest --cov=kaggle_pipeline --cov-report=term-missing  # coverage
 .venv/bin/ruff check src tests         # lint
 .venv/bin/ruff format src tests        # format
+.venv/bin/mypy                         # type-check (config in pyproject.toml)
 ```
+
+## Regression
+
+**Regression is not implemented yet.** Only classification is wired end-to-end:
+there are no regressor model definitions and the ensembling/prediction path only
+handles classification. To avoid a confusing late failure, a `regression` task
+fails fast with `NotImplementedError` — both when you set `task: regression`
+explicitly and when it is autodetected from a continuous numeric target. For now,
+keep targets categorical (or set `task: classification`). Regression support is
+planned.
+
+## Dependencies
+
+Installing the package pulls in everything below (declared in
+[`pyproject.toml`](pyproject.toml)); there are no optional groups yet, so the
+plotting libraries are installed even though `run` never imports them.
+
+| Dependency | Used by |
+| --- | --- |
+| `numpy`, `pandas`, `scipy` | everywhere — data frames, arrays, distributions |
+| `scikit-learn` (>=1.4) | preprocessing, CV, encoders, the stacking meta-model |
+| `lightgbm`, `catboost`, `xgboost` | the gradient-boosting models in the search |
+| `joblib` | parallel cross-validation across the model batch |
+| `pyyaml` | loading a `Config` from a YAML file |
+| `matplotlib`, `seaborn` | **`analyze` (EDA) only** — never imported by `run` |
+
+So a pure-training run (`run`) needs everything except `matplotlib`/`seaborn`;
+those are pulled in only for the standalone `analyze` flow. Dev extras
+(`pip install -e ".[dev]"`) add `pytest` and `ruff`.
 
 ## Notes
 
 - The original exploratory notebook is preserved untouched as
   [`Kaggle_Pipeline.ipynb`](Kaggle_Pipeline.ipynb) for reference.
-- Regression (`task: regression`) is stubbed but not yet implemented end-to-end,
-  matching the original notebook's state.
+- Runs are reproducible by default: `Config.seed` defaults to `42` and threads
+  through the model search, the leaderboard's class selection and the ensemble
+  search. Set `seed=None` for non-reproducible behaviour (the notebook default).
+- Progress output goes through Python's `logging` (the `kaggle_pipeline` logger)
+  rather than `print`; the entry points configure it at `INFO` so it shows by
+  default. Adjust the logger's level to quiet or redirect it.
 
 ## License
 

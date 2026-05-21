@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from kaggle_pipeline.config import Config
+from kaggle_pipeline.data.autodetect import resolve_csv_filenames, resolve_problem_definition
 
 
 @dataclass
@@ -22,12 +23,25 @@ class Datasets:
 def load_datasets(config: Config, data_dir: Path) -> Datasets:
     """Read the three CSVs and, if ``config.speed_up``, subsample for debugging.
 
+    Any CSV filename or problem-definition field left as ``None`` on the config
+    is autodetected here (and the choice is printed); see
+    :mod:`kaggle_pipeline.data.autodetect`. The detection runs on the full train
+    frame before any ``speed_up`` subsampling so it sees all classes.
+
     Subsampling mirrors the notebook: the first N rows of each frame so a full
     run completes in seconds while you iterate on the pipeline itself.
     """
+    resolve_csv_filenames(config, data_dir)
+    # resolve_csv_filenames fills any unset filename (or raises), so all three
+    # are concrete here.
+    assert config.train_csv is not None
+    assert config.test_csv is not None
+    assert config.sample_csv is not None
     train = pd.read_csv(data_dir / config.train_csv)
     test = pd.read_csv(data_dir / config.test_csv)
     sample = pd.read_csv(data_dir / config.sample_csv)
+
+    resolve_problem_definition(config, train)
 
     if config.speed_up:
         train = train[: config.speed_up_train_rows].copy()

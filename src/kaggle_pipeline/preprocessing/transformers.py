@@ -76,7 +76,12 @@ class CategoricalTyper(BaseEstimator, TransformerMixin):
         X = pd.DataFrame(X).copy()
         for col, cats in self.ordered_cats_.items():
             if col in X.columns:
-                X[col] = pd.Categorical(X[col], categories=cats, ordered=True)
+                # Values unseen at fit time (e.g. a test-only category) are mapped
+                # to NaN explicitly. Passing them to pd.Categorical is deprecated
+                # and will raise in a future pandas; masking first preserves the
+                # existing unseen -> NaN behaviour without the deprecated path.
+                known = X[col].where(X[col].isin(cats))
+                X[col] = pd.Categorical(known, categories=cats, ordered=True)
         obj_cols = X.select_dtypes(include=["object", "string"]).columns
         X[obj_cols] = X[obj_cols].astype("category")
         return X

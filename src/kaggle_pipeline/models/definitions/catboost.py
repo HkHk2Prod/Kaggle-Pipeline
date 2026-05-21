@@ -11,6 +11,10 @@ from kaggle_pipeline.models.registry import register_model
 
 @register_model(name="CatBoostClassifier", purposes="single_target_prob_pred")
 class CatBoostClassifierModel(Model):
+    # Native categorical handling (ordered target statistics); capability wins,
+    # so the raw columns are passed through and ``categorical_encoding`` is unused.
+    handles_categoricals = True
+
     def generate_distribution(self, complexity):
         k = complexity
         return {
