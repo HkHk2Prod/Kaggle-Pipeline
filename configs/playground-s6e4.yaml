@@ -57,11 +57,19 @@ ensemble_min_repr: 1             # minimum kept per model class
 cv_splits: 5
 cv_seed: 42
 
+# --- Exploratory data analysis ---
+# EDA is a separate command (`kaggle-pipeline analyze -c <this file>`) and is
+# opt-in: `analyze` only renders when run_eda is true, otherwise it logs that
+# EDA is disabled and exits. Training (`run`) never touches EDA either way.
+run_eda: false                   # set true to render plots + reports under `analyze`
+
 # --- Runtime ---
 speed_up: false                  # set true to subsample for fast debugging
 max_running_time: 43200          # seconds (Kaggle kernels cap at 12h)
-# Exploratory analysis is a separate command: `kaggle-pipeline analyze -c <this file>`
 seed: null                       # null = non-reproducible
+verbosity: normal                # 'quiet' (warnings/errors) | 'normal' | 'verbose'
+                                 #   (adds per-model scores, full leaderboard, encoding plan).
+                                 #   CLI -v/-q override this.
 
 # --- I/O (optional; derived from the environment when omitted) ---
 # data_dir: /path/to/local/data  # required only when running locally

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 
 from kaggle_pipeline.search.leaderboard import LeaderBoard, ModelClass, ModelEntry
@@ -94,3 +96,29 @@ def test_leaderboard_save_load_preserves_runtime_state(tmp_path):
     assert len(fresh.classes["LogisticRegression"]) == 1
     # ...but the *current* seed sequence is kept, not the pickled one.
     assert fresh.seed_seq is seed_b
+
+
+def test_load_rebases_entry_paths_to_current_storage_dir(tmp_path):
+    """A board saved elsewhere reloads with entry paths pointing at the new dir.
+
+    Mirrors a warm-start: a previous run saved the board (and model files) under
+    one dir; on resume the files are copied beside the board in *this* run's
+    storage dir, so loaded entries must point there, not at the stale path.
+    """
+    old = tmp_path / "old_models"
+    old.mkdir()
+    board = LeaderBoard(num_models=10, storage_dir=old, seed_seq=np.random.SeedSequence(1))
+    board.add_class("LogisticRegression", lower=1, upper=3)
+    board.classes["LogisticRegression"].insert(_entry(0.6, old))
+    board.save()
+
+    # Resume from a *different* storage dir holding a copy of the board file.
+    new = tmp_path / "new_models"
+    new.mkdir()
+    (new / "LeaderBoard").write_bytes((old / "LeaderBoard").read_bytes())
+    fresh = LeaderBoard(num_models=10, storage_dir=new, seed_seq=np.random.SeedSequence(2))
+    assert fresh.load() is True
+
+    entry = fresh.classes["LogisticRegression"].entries[0]
+    assert Path(entry.file_path).parent == new  # rebased onto the current dir
+    assert Path(entry.file_path).name == entry.name

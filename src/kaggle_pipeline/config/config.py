@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from kaggle_pipeline.logconfig import DEFAULT_VERBOSITY, VERBOSITY_LEVELS
+
 # Default ordering lists for categorical variables. Whenever a categorical
 # column's values are a subset of one of these lists it is treated as ordinal
 # and encoded in this order. Matching is case-insensitive: entries are
@@ -74,6 +76,22 @@ class Config:
     #   "soil_lt_25 = Soil_Moisture < 25".
     feature_expressions: list[str] = field(default_factory=list)
     order_lists: list[list[str]] = field(default_factory=lambda: list(DEFAULT_ORDER_LISTS))
+    # How each categorical predictor is encoded *for models that cannot consume a
+    # raw categorical column* (RandomForest, LogisticRegression). Maps a column
+    # name to a strategy in ``ENCODING_STRATEGIES``; columns left out default to
+    # frequency encoding. Capability wins: models that handle categoricals
+    # natively (CatBoost, XGBoost, LightGBM, HistGB) always get the raw column
+    # and ignore this map (HistGB excepted above its native cardinality cap).
+    categorical_encoding: dict[str, str] = field(default_factory=dict)
+
+    # --- Exploratory data analysis ------------------------------------------
+    # Whether ``analyze`` renders the EDA suite (metadata, correlation/association
+    # heatmaps, pairwise plots). Off by default: EDA is a standalone, interactive
+    # step fully decoupled from training -- a ``run`` never touches it -- so it is
+    # opt-in. Set to True (in the YAML or ``cfg.run_eda = True``) to render; when
+    # False, ``analyze`` logs that it is disabled and returns without loading data.
+    # The two fields below only tune those plots and have no effect when False.
+    run_eda: bool = False
     # Max unique values for a numeric column to still be drawn as categorical
     # on EDA graphs. Only affects plotting.
     cat_cutoff: int = 5
@@ -82,13 +100,6 @@ class Config:
     # column (e.g. a driver with hundreds of levels) from producing an illegible
     # one-layer-per-level plot. Only affects plotting.
     max_plot_cats: int = 20
-    # How each categorical predictor is encoded *for models that cannot consume a
-    # raw categorical column* (RandomForest, LogisticRegression). Maps a column
-    # name to a strategy in ``ENCODING_STRATEGIES``; columns left out default to
-    # frequency encoding. Capability wins: models that handle categoricals
-    # natively (CatBoost, XGBoost, LightGBM, HistGB) always get the raw column
-    # and ignore this map (HistGB excepted above its native cardinality cap).
-    categorical_encoding: dict[str, str] = field(default_factory=dict)
 
     # --- Feature pruning ----------------------------------------------------
     # Automatically drop predictors that are uncorrelated with the target or
@@ -102,7 +113,11 @@ class Config:
     redundancy_floor: float = 0.90
 
     # --- Model search -------------------------------------------------------
-    n_steps: int = 10
+    # Number of model-search batches to run. Set to ``None`` to instead run until
+    # ``max_running_time`` is the only thing that stops the search (the Kaggle
+    # notebook does this to use its whole 12h budget); the package keeps a small
+    # finite default so a bare ``Config()`` run is bounded by step count, not time.
+    n_steps: int | None = 10
     # Leaderboard capacity. Per-class lower/upper bounds given as floats are
     # read as fractions of this (see @register_model), so the search scales with it.
     num_models: int = 300
@@ -126,12 +141,22 @@ class Config:
     # (same seed -> same leaderboard and submission); set to ``None`` for
     # non-reproducible behaviour (the original notebook's default).
     seed: int | None = 42
+    # How much the pipeline prints as it runs. One of 'quiet' (warnings/errors
+    # only), 'normal' (stage progress + autodetect/prune summaries, the default)
+    # or 'verbose' (adds per-model scores, the full leaderboard each step and the
+    # encoding plan). Mapped to a logging level on the package logger; the CLI
+    # ``-v``/``-q`` flags override it. See :mod:`kaggle_pipeline.logconfig`.
+    verbosity: str = DEFAULT_VERBOSITY
 
     # --- I/O ----------------------------------------------------------------
     # When unset these are derived from the environment + ``competition``.
     data_dir: Path | None = None
     storage_dir: Path | None = None
-    # Kaggle only: a previous notebook's output dir to warm-start models from.
+    # Kaggle only: a previous notebook's output dir to warm-start (resume) the
+    # leaderboard from. ``None`` (the default) -> the Kaggle input mount is
+    # scanned automatically, so a re-run that has the prior output attached via
+    # *Add Input* continues its leaderboard without hand-wiring the mount path.
+    # Set this only to point at a specific directory or to disambiguate.
     previous_output_dir: Path | None = None
     # CSV filenames inside ``data_dir``. ``None`` -> found by searching the
     # directory for files whose names contain 'train' / 'test' / 'sample'.
@@ -158,6 +183,10 @@ class Config:
             raise ValueError(f"prune_alpha must be in (0, 1), got {self.prune_alpha}.")
         if not 0.0 <= self.redundancy_floor <= 1.0:
             raise ValueError(f"redundancy_floor must be in [0, 1], got {self.redundancy_floor}.")
+        if self.verbosity not in VERBOSITY_LEVELS:
+            raise ValueError(
+                f"verbosity must be one of {sorted(VERBOSITY_LEVELS)}, got {self.verbosity!r}."
+            )
         if self.task == "regression":
             raise NotImplementedError(REGRESSION_NOT_IMPLEMENTED)
 

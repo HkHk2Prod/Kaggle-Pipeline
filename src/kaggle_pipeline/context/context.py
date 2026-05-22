@@ -120,6 +120,7 @@ def build_context(config: Config, datasets: Datasets, paths: ResolvedPaths) -> P
         target_is_num=config.target_is_num,
         ordered_cats=ordered_cats,
         prediction_aim=config.prediction_aim,
+        order_lists=config.order_lists,
     )
 
     return PipelineContext(

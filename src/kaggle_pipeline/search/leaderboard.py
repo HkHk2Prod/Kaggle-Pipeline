@@ -261,13 +261,15 @@ class LeaderBoard:
         """Select ensemble members: a minimum per class, then top scorers."""
         length = min(length, len(self))
         files: set[tuple[str, str]] = set()
-        logger.info("Picked models (minimal requirement):")
+        # Per-member listing of the chosen ensemble -- verbose only; the final
+        # ensemble's score is reported at the default level in ``Judge.predict``.
+        logger.debug("Picked models (minimal requirement):")
         if min_repr:
             for cl in self.classes.values():
                 for entry in cl.entries[:min_repr]:
                     files.add((entry.name, entry.file_path))
-                    logger.info("Score: %s. Name: %s", entry.score, entry.name)
-        logger.info("Picked models (best score):")
+                    logger.debug("Score: %s. Name: %s", entry.score, entry.name)
+        logger.debug("Picked models (best score):")
         table = []
         for _name, cl in self.classes.items():
             for entry in cl.entries:
@@ -277,7 +279,7 @@ class LeaderBoard:
         for score, data in table:
             if len(files) >= length:
                 break
-            logger.info("Score: %s. Name: %s", score, data[0])
+            logger.debug("Score: %s. Name: %s", score, data[0])
             files.add(data)
         return list(files)
 
@@ -302,6 +304,7 @@ class LeaderBoard:
             current_storage_dir, current_seed_seq = self.storage_dir, self.seed_seq
             self.__dict__.update(loaded.__dict__)
             self.storage_dir, self.seed_seq = current_storage_dir, current_seed_seq
+            self._rebase_entry_paths()
             return True
         logger.warning(
             "Loaded leaderboard was corrupted. Class was %s instead of %s",
@@ -309,3 +312,18 @@ class LeaderBoard:
             type(self),
         )
         return False
+
+    def _rebase_entry_paths(self) -> None:
+        """Point every entry at its model file in the *current* storage dir.
+
+        Each entry pickles an absolute ``file_path`` from the run that saved it
+        (a previous Kaggle kernel's ``/kaggle/working/Models``, say). On resume
+        the model files are warm-started into *this* run's storage dir, so the
+        baked-in path may no longer exist. The on-disk basename always equals the
+        entry name (see :meth:`generate_model_entry`), so rebuild each path as
+        ``storage_dir / name``. Within a single run this is a no-op; across runs
+        it is what lets the ensemble actually reload the resumed models.
+        """
+        for model_class in self.classes.values():
+            for entry in model_class.entries:
+                entry.file_path = str(self.storage_dir / entry.name)

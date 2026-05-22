@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import time
 
@@ -20,7 +21,8 @@ def run_training(ctx: PipelineContext) -> np.ndarray:
     Each step is cross-validated and the leaderboard is checkpointed to disk, so
     a Kaggle kernel that is interrupted can resume from the last saved board.
     The loop stops early if another step would risk exceeding
-    ``config.max_running_time``.
+    ``config.max_running_time``. With ``config.n_steps`` set to ``None`` the
+    search runs until that time budget is the only thing that stops it.
     """
     config = ctx.config
     start_time = time.perf_counter()
@@ -29,10 +31,14 @@ def run_training(ctx: PipelineContext) -> np.ndarray:
     judge = Judge(ctx, cv)
     judge.load()
 
-    for i in range(config.n_steps):
+    steps = itertools.count() if config.n_steps is None else range(config.n_steps)
+    for i in steps:
         compute_time = judge.step()
         judge.save()
-        logger.info("%d steps done out of %d.\n", i + 1, config.n_steps)
+        if config.n_steps is None:
+            logger.info("%d steps done.\n", i + 1)
+        else:
+            logger.info("%d steps done out of %d.\n", i + 1, config.n_steps)
         elapsed = time.perf_counter() - start_time
         if elapsed + 3 * compute_time > config.max_running_time:
             logger.info("We are low on time and stop the training cycle.")

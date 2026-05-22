@@ -11,6 +11,16 @@ here. The entry points (:func:`~kaggle_pipeline.pipeline.run`,
 :func:`~kaggle_pipeline.analysis.analyze` and the CLI) call
 :func:`configure_logging` so output appears out of the box; embedders can call
 it themselves (or configure the ``kaggle_pipeline`` logger directly) instead.
+
+How *much* is shown is a single knob, ``Config.verbosity``, mapped here to a
+logging level by :func:`level_for_verbosity`:
+
+* ``"quiet"`` -> ``WARNING``: only warnings and errors (autodetect anomalies,
+  a corrupt leaderboard, an exhausted time budget).
+* ``"normal"`` -> ``INFO`` (the default): stage progress, the autodetected
+  fields, the prune summary, the chosen ensemble's score and the submission path.
+* ``"verbose"`` -> ``DEBUG``: everything above plus the per-model scores, the
+  full leaderboard after each step, the encoding plan and the submission preview.
 """
 
 from __future__ import annotations
@@ -19,6 +29,30 @@ import logging
 import sys
 
 PACKAGE_LOGGER = "kaggle_pipeline"
+
+# The user-facing verbosity names (set on ``Config.verbosity`` / in YAML) mapped
+# to the package logger's level. Single source of truth: ``Config`` validates
+# against the keys and the entry points configure the level from them.
+VERBOSITY_LEVELS: dict[str, int] = {
+    "quiet": logging.WARNING,
+    "normal": logging.INFO,
+    "verbose": logging.DEBUG,
+}
+DEFAULT_VERBOSITY = "normal"
+
+
+def level_for_verbosity(verbosity: str) -> int:
+    """Map a :data:`VERBOSITY_LEVELS` name to a logging level.
+
+    Raises :class:`ValueError` on an unknown name. ``Config`` validates the
+    value too, but this stays defensive for embedders calling it directly.
+    """
+    try:
+        return VERBOSITY_LEVELS[verbosity]
+    except KeyError:
+        raise ValueError(
+            f"Unknown verbosity {verbosity!r}; expected one of {sorted(VERBOSITY_LEVELS)}."
+        ) from None
 
 
 def configure_logging(level: int = logging.INFO, *, force: bool = False) -> logging.Logger:
