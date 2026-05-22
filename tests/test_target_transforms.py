@@ -129,17 +129,27 @@ def test_conventional_binary_positive_class_does_not_warn():
         lambda: (
             # 0/1 numeric target: sorted -> [0, 1], P(1) is the convention.
             build_target_transforms(
-                train_num, target=["y"], target_is_num=False, ordered_cats={},
+                train_num,
+                target=["y"],
+                target_is_num=False,
+                ordered_cats={},
                 prediction_aim="probability",
             ),
             # Values matching a configured order_lists entry: ordering is intentional.
             build_target_transforms(
-                train_yn, target=["y"], target_is_num=False, ordered_cats={"y": ["no", "yes"]},
-                prediction_aim="probability", order_lists=[["no", "yes"]],
+                train_yn,
+                target=["y"],
+                target_is_num=False,
+                ordered_cats={"y": ["no", "yes"]},
+                prediction_aim="probability",
+                order_lists=[["no", "yes"]],
             ),
             # category aim can't invert (order[argmax] recovers the right label).
             build_target_transforms(
-                train_yn, target=["y"], target_is_num=False, ordered_cats={"y": ["cat", "dog"]},
+                train_yn,
+                target=["y"],
+                target_is_num=False,
+                ordered_cats={"y": ["cat", "dog"]},
                 prediction_aim="category",
             ),
         )
