@@ -105,6 +105,14 @@ def test_autodetect_data_dir_missing_root_returns_none(tmp_path: Path):
     assert autodetect_data_dir(tmp_path / "does-not-exist") is None
 
 
+def test_autodetect_data_dir_finds_nested_competition_layout(tmp_path: Path):
+    # Real Kaggle layout: /kaggle/input/competitions/<slug>/{train,test}.csv,
+    # i.e. the data dir is two levels below the input root, not an immediate child.
+    inp = tmp_path / "input"
+    target = _make_input_dir(inp / "competitions", "playground-series-s6e5")
+    assert autodetect_data_dir(inp) == target
+
+
 def test_autodetect_data_dir_disambiguates_by_competition(tmp_path: Path):
     inp = tmp_path / "input"
     _make_input_dir(inp, "comp-a")
@@ -116,7 +124,7 @@ def test_autodetect_data_dir_ambiguous_raises(tmp_path: Path):
     inp = tmp_path / "input"
     _make_input_dir(inp, "comp-a")
     _make_input_dir(inp, "comp-b")
-    with pytest.raises(FileNotFoundError, match="Multiple inputs"):
+    with pytest.raises(FileNotFoundError, match="Multiple directories"):
         autodetect_data_dir(inp)  # two candidates, nothing to disambiguate
 
 
@@ -139,6 +147,7 @@ def test_build_pipeline_with_full_autodetect(synthetic_data_dir: Path, tmp_path:
         num_models=4,
         step_batch_size=2,
         n_workers=1,
+        prune_features=False,  # this test is about autodetection, not pruning
         data_dir=synthetic_data_dir,
         storage_dir=tmp_path / "models",
     )

@@ -7,9 +7,14 @@ summarise each *original* column as a single row/column, picking a measure that
 fits the pair of column types:
 
 * numeric  vs numeric      -> ``|Pearson r|``      (linear strength)
-* categorical vs numeric   -> correlation ratio η   (how much the category
-                                                      explains the numeric mean)
+* categorical vs numeric   -> bias-corrected correlation ratio η (ε²) (how much
+                                                      the category explains the
+                                                      numeric mean)
 * categorical vs categorical -> bias-corrected Cramér's V
+
+The two cross-type measures (η and Cramér's V) are *both* bias-corrected so a
+high-cardinality column does not show a spurious strength in one block while
+correctly reading ~0 in the other.
 
 All three live on ``[0, 1]`` and are *unsigned* strengths, so the resulting
 matrix is deliberately not a correlation matrix -- :func:`association_matrix`
@@ -50,11 +55,23 @@ def cramers_v(x: pd.Series, y: pd.Series) -> float:
 
 
 def correlation_ratio(categories: pd.Series, values: pd.Series) -> float:
-    """Correlation ratio η between a categorical and a numeric series, ``[0, 1]``.
+    """Bias-corrected correlation ratio between a categorical and numeric series, ``[0, 1]``.
 
-    η² is the fraction of the numeric variance explained by the group means, so
-    η = 0 means the category tells you nothing about the numeric column and η = 1
-    means the category fully determines it.
+    The raw η² = SS_between / SS_total inflates with the number of groups: an
+    *independent* category still yields η ≈ √((k-1)/(n-1)) purely from the group
+    count, so a high-cardinality column (e.g. ``driver``) shows a spurious ~0.5
+    against every numeric. That mirrors the uncorrected-Cramér's-V problem, so we
+    apply the analogous correction here -- the ε² (epsilon-squared) estimator
+
+        ε² = (SS_between - (k-1)·MS_within) / SS_total,   MS_within = SS_within/(n-k)
+
+    and return ``√max(0, ε²)``. Under independence E[SS_between] ≈ (k-1)·MS_within,
+    so ε² collapses to ~0, keeping the cat–num block consistent with the
+    bias-corrected :func:`cramers_v`. η = 0 means the category tells you nothing
+    about the numeric column and η = 1 means it fully determines it. A
+    single-category or one-row-per-category (unique) column returns ``0.0``: it
+    has no within-group variance to correct against and carries no generalisable
+    association, matching how :func:`cramers_v` treats a degenerate column.
     """
     frame = pd.DataFrame(
         {"cat": categories.to_numpy(), "val": pd.to_numeric(values, errors="coerce")}
@@ -63,15 +80,22 @@ def correlation_ratio(categories: pd.Series, values: pd.Series) -> float:
     if frame.empty:
         return 0.0
     values_arr = frame["val"].to_numpy(dtype=float)
+    n = len(values_arr)
     total_mean = values_arr.mean()
     ss_total = float(((values_arr - total_mean) ** 2).sum())
     if ss_total == 0:
         return 0.0
     ss_between = 0.0
+    k = 0
     for _, group in frame.groupby("cat", observed=True)["val"]:
         g = group.to_numpy(dtype=float)
         ss_between += len(g) * (g.mean() - total_mean) ** 2
-    return float(np.sqrt(ss_between / ss_total))
+        k += 1
+    if k < 2 or n <= k:  # need >= 2 groups and within-group d.o.f. to correct.
+        return 0.0
+    ms_within = (ss_total - ss_between) / (n - k)
+    eps_sq = (ss_between - (k - 1) * ms_within) / ss_total
+    return float(np.sqrt(eps_sq)) if eps_sq > 0 else 0.0
 
 
 def association_matrix(

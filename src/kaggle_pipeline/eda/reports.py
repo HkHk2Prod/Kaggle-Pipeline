@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-from kaggle_pipeline.eda.association import association_matrix
+from kaggle_pipeline.preprocessing.association import association_matrix
 
 _RULE = "\n\n" + "-" * 40 + "\n"
 
@@ -37,7 +37,7 @@ def correlation_matrices(
 
     The first heatmap is the usual *signed* Pearson correlation over numeric
     columns only. The second is an *association* matrix (see
-    :mod:`kaggle_pipeline.eda.association`) with one row/column per original
+    :mod:`kaggle_pipeline.preprocessing.association`) with one row/column per original
     column, so a high-cardinality categorical stays a single cell instead of
     exploding into one dummy per level.
     """

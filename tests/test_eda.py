@@ -9,12 +9,21 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")  # headless backend; must precede pyplot import
+import warnings  # noqa: E402
+
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+from pandas.errors import PerformanceWarning  # noqa: E402
 
 from kaggle_pipeline import Config, analyze  # noqa: E402
-from kaggle_pipeline.eda.association import (  # noqa: E402
+from kaggle_pipeline.eda.plots import (  # noqa: E402
+    EdaContext,
+    _cap_categories,
+    plot_cat_vs_any,
+    plot_num_vs_cat,
+)
+from kaggle_pipeline.preprocessing.association import (  # noqa: E402
     association_matrix,
     correlation_ratio,
     cramers_v,
@@ -70,6 +79,22 @@ def test_correlation_ratio_perfect_and_zero():
     assert correlation_ratio(cats, pd.Series([5.0] * 150)) == 0.0  # constant -> 0
 
 
+def test_correlation_ratio_bias_corrected_for_high_cardinality():
+    """An independent high-cardinality category must not show a spurious η.
+
+    Raw η² = SS_between / SS_total inflates with the group count: under
+    independence η ≈ √((k-1)/(n-1)), which for a ``driver``-like column on a
+    subsample is ~0.5 against *every* numeric (a noise floor, not a relationship).
+    The ε² correction collapses it toward 0, keeping the cat–num block consistent
+    with the Bergsma-corrected cramers_v (which already reads ~0 for such columns).
+    """
+    rng = np.random.default_rng(0)
+    n = 1000
+    hi_card = pd.Series(rng.integers(0, 350, size=n).astype(str))  # ~r/n = 0.35
+    independent_num = pd.Series(rng.normal(size=n))
+    assert correlation_ratio(hi_card, independent_num) < 0.1  # raw η would be ~0.58
+
+
 def test_association_matrix_collapses_highcardinality_to_one_cell():
     rng = np.random.default_rng(0)
     n = 200
@@ -88,6 +113,53 @@ def test_association_matrix_collapses_highcardinality_to_one_cell():
     assert np.allclose(np.diag(arr), 1.0)  # self-association is 1
     assert np.allclose(arr, arr.T)  # symmetric
     assert ((arr >= 0) & (arr <= 1)).all()  # unsigned, in [0, 1]
+
+
+def test_cap_categories_folds_high_cardinality_and_preserves_nan():
+    rng = np.random.default_rng(0)
+    s = pd.Series(rng.integers(0, 200, size=1000).astype(str))
+    s[s.sample(20, random_state=1).index] = np.nan
+    capped, order = _cap_categories(s, ordered=None, max_levels=12)
+    assert capped.nunique() == 13  # top 12 + "Other"
+    assert order[-1] == "Other" and len(order) == 13
+    assert capped.isna().sum() == 20  # NaNs are preserved, never bucketed
+    # A column already within the cap is returned untouched, in the given order.
+    low = pd.Series(["a", "b", "c", "a"])
+    same, low_order = _cap_categories(low, ordered=["a", "b", "c"], max_levels=12)
+    assert same.equals(low) and low_order == ["a", "b", "c"]
+
+
+def test_high_cardinality_plots_emit_no_performance_warning():
+    """A high-cardinality categorical must not flood seaborn with fragmentation warnings.
+
+    Plotting hundreds of hue levels / boxplot groups makes seaborn build one
+    column per level, raising pandas' "highly fragmented DataFrame"
+    PerformanceWarning (and an unusable plot). The top-N + "Other" cap prevents it.
+    """
+    rng = np.random.default_rng(0)
+    n = 2000
+    df = pd.DataFrame(
+        {
+            "lap": rng.normal(size=n),
+            "driver": pd.Series(rng.integers(0, 400, size=n).astype(str)).astype("category"),
+        }
+    )
+    ctx = EdaContext(
+        df=df,
+        ordered_cats={},
+        columns=[],
+        columns_x=[],
+        num_cols=["lap"],
+        cat_cols=["driver"],
+        target=["lap"],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", PerformanceWarning)
+        _, ax = plt.subplots()
+        plot_cat_vs_any(ctx, ax, "lap", "driver")  # histplot hue path
+        _, ax = plt.subplots()
+        plot_num_vs_cat(ctx, ax, "driver", "lap")  # boxplot group path
+    plt.close("all")
 
 
 def test_training_import_does_not_pull_matplotlib():
