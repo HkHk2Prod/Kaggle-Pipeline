@@ -18,7 +18,7 @@ imports plotting libraries or renders anything:
 run:      detect env → load data → preprocess + build context
                      → adaptive model search (leaderboard) → stacked ensemble → submission.csv
 
-analyze:  detect env → load data → EDA (metadata, correlations, pairwise plots)
+analyze:  detect env → load data → EDA (metadata, correlations, pairwise plots)  [opt-in: run_eda]
 ```
 
 - **Preprocessing** (`preprocessing/`): feature engineering from `pandas.eval`
@@ -96,8 +96,13 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 # Train from a YAML config (set data_dir to your local data folder)
 .venv/bin/kaggle-pipeline run --config configs/playground-s6e4.yaml
 
-# Or explore the data first (separate, no training)
+# Or explore the data first (separate, no training). EDA is opt-in:
+# set `run_eda: true` in the config -- otherwise analyze logs that it's
+# disabled and exits without rendering.
 .venv/bin/kaggle-pipeline analyze --config configs/playground-s6e4.yaml
+
+# Add -v for verbose output (per-model scores, full leaderboard) or -q to quiet it
+.venv/bin/kaggle-pipeline run --config configs/playground-s6e4.yaml -v
 ```
 
 Or from Python:
@@ -106,8 +111,9 @@ Or from Python:
 from kaggle_pipeline import Config, run, analyze
 
 cfg = Config.from_yaml("configs/playground-s6e4.yaml")
-analyze(cfg)   # optional: render EDA only
-run(cfg)       # train + write submission
+cfg.run_eda = True  # EDA is opt-in (run_eda defaults to False)
+analyze(cfg)        # optional: render EDA only
+run(cfg)            # train + write submission (ignores run_eda)
 ```
 
 ## Configuration
@@ -275,8 +281,14 @@ those are pulled in only for the standalone `analyze` flow. Dev extras
   through the model search, the leaderboard's class selection and the ensemble
   search. Set `seed=None` for non-reproducible behaviour (the notebook default).
 - Progress output goes through Python's `logging` (the `kaggle_pipeline` logger)
-  rather than `print`; the entry points configure it at `INFO` so it shows by
-  default. Adjust the logger's level to quiet or redirect it.
+  rather than `print`. How much is shown is the `verbosity` config field:
+  `quiet` (warnings/errors only), `normal` (the default: stage progress plus the
+  autodetected fields, prune summary, chosen-ensemble score and submission path)
+  or `verbose` (adds per-model scores, the full leaderboard after each step, the
+  encoding plan and a submission preview). The CLI flags `-v`/`--verbose` and
+  `-q`/`--quiet` override the config value, e.g.
+  `kaggle-pipeline run -c config.yaml -v`. Embedders can still configure the
+  `kaggle_pipeline` logger directly to redirect or filter output.
 
 ## License
 

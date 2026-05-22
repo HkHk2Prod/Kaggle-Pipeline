@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
@@ -10,20 +11,26 @@ import seaborn as sns
 
 from kaggle_pipeline.preprocessing.association import association_matrix
 
+logger = logging.getLogger(__name__)
+
 _RULE = "\n\n" + "-" * 40 + "\n"
 
 
 def print_meta_data(train_df: pd.DataFrame, test_df: pd.DataFrame) -> None:
-    """Print shapes, describe(), null counts and unique counts for the train set."""
-    print("Train shape: ", train_df.shape, "Test Shape: ", test_df.shape)
-    print(_RULE)
-    print(train_df.describe().T)
-    print(_RULE)
-    print("Nulls:\n\n", train_df.isnull().sum().sort_values())
-    print(_RULE)
-    print("Uniques:\n\n", train_df.nunique().sort_values())
-    print(_RULE)
-    print(train_df.head(10))
+    """Log shapes, describe(), null counts and unique counts for the train set.
+
+    Goes through the package logger (not ``print``) so it honours
+    ``Config.verbosity``: shown at 'normal'/'verbose', suppressed at 'quiet'.
+    """
+    logger.info("Train shape: %s  Test Shape: %s", train_df.shape, test_df.shape)
+    logger.info("%s", _RULE)
+    logger.info("%s", train_df.describe().T)
+    logger.info("%s", _RULE)
+    logger.info("Nulls:\n\n%s", train_df.isnull().sum().sort_values())
+    logger.info("%s", _RULE)
+    logger.info("Uniques:\n\n%s", train_df.nunique().sort_values())
+    logger.info("%s", _RULE)
+    logger.info("%s", train_df.head(10))
 
 
 def correlation_matrices(

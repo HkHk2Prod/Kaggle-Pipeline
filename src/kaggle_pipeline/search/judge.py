@@ -77,13 +77,16 @@ class Judge:
         )
 
         for name, entry, msg in results:
-            logger.info(msg)
+            # Per-model detail (one line per model in the batch) -- verbose only.
+            logger.debug(msg)
             self.board.add(name, entry)
         self.board.evaluate_models()
 
         timer = time.perf_counter() - timer
         time_spent = time.strftime("%H:%M:%S", time.gmtime(timer))
-        logger.info("%s", self)
+        # The full leaderboard table each step is verbose; the one-line batch
+        # summary below stays at the default level.
+        logger.debug("%s", self)
         logger.info("Tested a batch of %d model(s). It took %s.", batch_size, time_spent)
         return timer
 
@@ -161,12 +164,10 @@ class Judge:
 
     def load(self) -> None:
         if self.board.load():
-            logger.info(
-                "Loading of existing leaderboard is successful. The Leader board is: \n %s \n\n",
-                self,
-            )
+            logger.info("Loaded existing leaderboard (%d model(s)).", len(self.board))
+            logger.debug("The leaderboard is: \n %s \n\n", self)
         else:
-            logger.info("Loading failed. New leaderboard is created.\n")
+            logger.info("No existing leaderboard found; starting a new one.")
 
     def __str__(self) -> str:
         return self.board.__str__()

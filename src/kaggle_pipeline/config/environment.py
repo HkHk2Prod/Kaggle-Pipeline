@@ -29,6 +29,11 @@ KAGGLE_INPUT_ROOT = Path("/kaggle/input")
 # datasets as /kaggle/input/<slug>/ (depth 1), so scan a few levels rather than
 # only the immediate children.
 DATA_DIR_SEARCH_DEPTH = 3
+# How many levels below the input root to look for a previous run's saved
+# leaderboard, for warm-starting. A notebook's own prior output mounts under
+# /kaggle/input/notebooks/<user>/<slug>/ (depth 3) and the pipeline saves the
+# board one level deeper in a Models/ dir, so search comfortably past that.
+PREVIOUS_OUTPUT_SEARCH_DEPTH = 6
 
 
 def detect_environment() -> str:
@@ -65,7 +70,7 @@ def resolve_paths(config: Config, env: str | None = None) -> ResolvedPaths:
         # the input mount is read-only -- so resolve it independently of data_dir.
         storage_dir = config.storage_dir or working_dir / "Models"
         data_dir = config.data_dir or _resolve_kaggle_data_dir(config)
-        _warm_start_from_previous_output(config, working_dir)
+        _warm_start_from_previous_output(config, storage_dir)
     elif env == COLAB:
         _mount_drive()
         working_dir = Path.cwd()
@@ -181,16 +186,61 @@ def _resolve_kaggle_data_dir(config: Config) -> Path:
     )
 
 
-def _warm_start_from_previous_output(config: Config, working_dir: Path) -> None:
-    """Copy a previous Kaggle notebook's output into the working dir (if present)."""
-    previous = config.previous_output_dir
-    if previous is None:
+def _warm_start_from_previous_output(config: Config, storage_dir: Path) -> None:
+    """Resume a prior run by copying its saved leaderboard into ``storage_dir``.
+
+    The search root is ``config.previous_output_dir`` when set, otherwise the
+    whole Kaggle input mount: a notebook's own previous output, re-attached via
+    *Add Input*, lands under ``/kaggle/input/notebooks/<user>/<slug>/`` and is
+    found automatically, so a re-run continues the previous leaderboard without
+    the user hand-wiring the (non-obvious) mount path. The directory holding the
+    ``LeaderBoard`` file is copied wholesale -- the board plus every model pickle
+    beside it -- into ``storage_dir``, where :meth:`Judge.load` then picks it up.
+    """
+    explicit = config.previous_output_dir
+    search_root = Path(explicit) if explicit is not None else KAGGLE_INPUT_ROOT
+    if not search_root.exists():
+        if explicit is not None:
+            logger.warning("previous_output_dir not found: %s. Check your path!", explicit)
         return
-    if os.path.exists(previous):
-        shutil.copytree(previous, working_dir, dirs_exist_ok=True)
-        logger.info("Successfully copied previous output to: %s", working_dir)
-    else:
-        logger.warning("Previous output dir not found: %s. Check your path!", previous)
+
+    source = _find_previous_leaderboard_dir(search_root)
+    if source is None:
+        # An explicit dir that holds no board is a likely mistake worth warning
+        # about; finding none under the whole input mount is just a first run.
+        if explicit is not None:
+            logger.warning("No saved leaderboard found under previous_output_dir %s.", explicit)
+        else:
+            logger.info("[warm-start] no previous leaderboard found under %s.", search_root)
+        return
+
+    if source.resolve() == storage_dir.resolve():
+        return  # Already the active board (e.g. a same-session re-run).
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source, storage_dir, dirs_exist_ok=True)
+    logger.info("[warm-start] resumed previous leaderboard from %s", source)
+
+
+def _find_previous_leaderboard_dir(
+    root: Path, max_depth: int = PREVIOUS_OUTPUT_SEARCH_DEPTH
+) -> Path | None:
+    """Return the directory holding a saved ``LeaderBoard`` under ``root``.
+
+    Looks at ``root`` itself and its sub-directories down to ``max_depth`` levels
+    for the pickle written by :meth:`LeaderBoard.save`. When more than one prior
+    output is attached, the most recently modified board wins.
+    """
+    from kaggle_pipeline.search.leaderboard import LEADERBOARD_FILENAME
+
+    found: list[Path] = []
+    if (root / LEADERBOARD_FILENAME).is_file():
+        found.append(root / LEADERBOARD_FILENAME)
+    for depth in range(1, max_depth + 1):
+        pattern = "/".join(["*"] * depth + [LEADERBOARD_FILENAME])
+        found.extend(p for p in root.glob(pattern) if p.is_file())
+    if not found:
+        return None
+    return max(found, key=lambda p: p.stat().st_mtime).parent
 
 
 def _mount_drive() -> None:

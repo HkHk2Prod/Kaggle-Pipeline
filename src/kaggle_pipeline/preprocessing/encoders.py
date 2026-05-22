@@ -9,9 +9,9 @@ This module decides *how* each categorical predictor is encoded for those
 models. The choice is per column and user-controlled via
 ``Config.categorical_encoding``; any column left unspecified defaults to
 :data:`DEFAULT_STRATEGY` (frequency encoding). :func:`resolve_encoding_plan`
-fills in the defaults and logs an ``[encoding]`` summary so the rule is
-explicit in the run log, and :func:`categorical_transformer_specs` turns a
-resolved plan into ``ColumnTransformer`` entries.
+fills in the defaults and logs the per-column ``[encoding]`` plan at DEBUG (so it
+appears under ``verbosity='verbose'``), and :func:`categorical_transformer_specs`
+turns a resolved plan into ``ColumnTransformer`` entries.
 """
 
 from __future__ import annotations
@@ -88,7 +88,8 @@ def resolve_encoding_plan(
 
     if announce:
         unknown_cols = sorted(set(categorical_encoding) - set(cat_set))
-        logger.info(
+        # The per-column plan is detail; log it at DEBUG (verbose) only.
+        logger.debug(
             "[encoding] categorical encoding plan (used by models without native "
             "categorical support, e.g. RandomForest / LogisticRegression; "
             "native-capable models receive the raw column):"
@@ -96,11 +97,11 @@ def resolve_encoding_plan(
         for col in cat_set:
             n_unique = train_df[col].nunique() if col in train_df.columns else "?"
             default_note = "" if col in categorical_encoding else " (default)"
-            logger.info(
+            logger.debug(
                 "[encoding]   %s = %r%s  (%s unique)", col, plan[col], default_note, n_unique
             )
         for col in unknown_cols:
-            logger.info(
+            logger.debug(
                 "[encoding]   %r in categorical_encoding is not a categorical predictor; ignored.",
                 col,
             )

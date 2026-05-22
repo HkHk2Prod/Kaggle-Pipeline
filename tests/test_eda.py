@@ -31,8 +31,21 @@ from kaggle_pipeline.preprocessing.association import (  # noqa: E402
 
 
 def test_analyze_runs_without_error(smoke_config: Config):
+    smoke_config.run_eda = True  # opt in -- EDA is off by default
     analyze(smoke_config)
     plt.close("all")
+
+
+def test_analyze_skipped_when_run_eda_false(monkeypatch):
+    """With the default flag, analyze returns early without rendering or loading data."""
+    import kaggle_pipeline.eda as eda_mod
+
+    def _should_not_run(*args, **kwargs):  # pragma: no cover - asserts it isn't called
+        raise AssertionError("run_eda must not be called when config.run_eda is False")
+
+    monkeypatch.setattr(eda_mod, "run_eda", _should_not_run)
+    assert Config().run_eda is False  # default
+    analyze(Config())  # no data_dir needed: it returns before loading anything
 
 
 def test_analyze_with_low_cardinality_numeric(tmp_path: Path):
@@ -59,7 +72,7 @@ def test_analyze_with_low_cardinality_numeric(tmp_path: Path):
         tmp_path / "sample_submission.csv", index=False
     )
 
-    analyze(Config(competition="synthetic", data_dir=tmp_path))
+    analyze(Config(competition="synthetic", data_dir=tmp_path, run_eda=True))
     plt.close("all")
 
 
