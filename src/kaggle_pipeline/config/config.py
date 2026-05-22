@@ -77,6 +77,11 @@ class Config:
     # Max unique values for a numeric column to still be drawn as categorical
     # on EDA graphs. Only affects plotting.
     cat_cutoff: int = 5
+    # Max distinct levels a categorical may have before EDA plots fold it to its
+    # top-N most frequent levels plus an "Other" bucket. Prevents a high-cardinality
+    # column (e.g. a driver with hundreds of levels) from producing an illegible
+    # one-layer-per-level plot. Only affects plotting.
+    max_plot_cats: int = 20
     # How each categorical predictor is encoded *for models that cannot consume a
     # raw categorical column* (RandomForest, LogisticRegression). Maps a column
     # name to a strategy in ``ENCODING_STRATEGIES``; columns left out default to
@@ -84,6 +89,17 @@ class Config:
     # natively (CatBoost, XGBoost, LightGBM, HistGB) always get the raw column
     # and ignore this map (HistGB excepted above its native cardinality cap).
     categorical_encoding: dict[str, str] = field(default_factory=dict)
+
+    # --- Feature pruning ----------------------------------------------------
+    # Automatically drop predictors that are uncorrelated with the target or
+    # redundant with another predictor; thresholds are inferred from the dataset
+    # size (see :mod:`kaggle_pipeline.preprocessing.selection`). On by default.
+    prune_features: bool = True
+    # Significance level for the size-inferred thresholds: the irrelevance cut-off
+    # tau(n) and the (1 - prune_alpha) redundancy confidence bound.
+    prune_alpha: float = 0.05
+    # Confident-association floor above which two predictors are deemed redundant.
+    redundancy_floor: float = 0.90
 
     # --- Model search -------------------------------------------------------
     n_steps: int = 10
@@ -138,6 +154,10 @@ class Config:
         # here rather than requiring the user to write entries in lower case.
         self.order_lists = [[str(v).lower() for v in group] for group in self.order_lists]
         self._validate_categorical_encoding()
+        if not 0.0 < self.prune_alpha < 1.0:
+            raise ValueError(f"prune_alpha must be in (0, 1), got {self.prune_alpha}.")
+        if not 0.0 <= self.redundancy_floor <= 1.0:
+            raise ValueError(f"redundancy_floor must be in [0, 1], got {self.redundancy_floor}.")
         if self.task == "regression":
             raise NotImplementedError(REGRESSION_NOT_IMPLEMENTED)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from sklearn.pipeline import Pipeline
 
 from kaggle_pipeline.config import Config
+from kaggle_pipeline.preprocessing.selection import CorrelationPruner
 from kaggle_pipeline.preprocessing.transformers import (
     CategoricalTyper,
     FeatureEngineer,
@@ -16,30 +17,43 @@ CATEGORICAL_TYPER_STEP = "categorical_typer"
 
 
 def build_pretrain_pipeline(config: Config) -> Pipeline:
-    """Feature engineering -> categorical typing -> ordinal encoding.
+    """Feature engineering -> categorical typing -> ordinal encoding [-> pruning].
 
     Fitted once on the training frame and then applied to test; this is distinct
-    from the per-model preprocessing baked into each estimator's own pipeline.
+    from the per-model preprocessing baked into each estimator's own pipeline. The
+    correlation pruner is appended only when ``config.prune_features`` is set.
     """
-    return Pipeline(
-        [
-            ("feature_engineer", FeatureEngineer(expressions=config.feature_expressions)),
-            (
-                CATEGORICAL_TYPER_STEP,
-                CategoricalTyper(
-                    cat_cutoff=config.cat_cutoff,
-                    cat_order_list=_flatten(config.order_lists),
-                ),
+    steps = [
+        ("feature_engineer", FeatureEngineer(expressions=config.feature_expressions)),
+        (
+            CATEGORICAL_TYPER_STEP,
+            CategoricalTyper(
+                cat_cutoff=config.cat_cutoff,
+                cat_order_list=_flatten(config.order_lists),
             ),
+        ),
+        (
+            "ordinal_encoder",
+            OrdinalEncoderTransformer(
+                target=config.target,
+                order_lists=config.order_lists,
+            ),
+        ),
+    ]
+    if config.prune_features:
+        steps.append(
             (
-                "ordinal_encoder",
-                OrdinalEncoderTransformer(
+                "correlation_pruner",
+                CorrelationPruner(
                     target=config.target,
-                    order_lists=config.order_lists,
+                    id_col=config.id_col,
+                    alpha=config.prune_alpha,
+                    redundancy_floor=config.redundancy_floor,
+                    cat_cutoff=config.cat_cutoff,
                 ),
-            ),
-        ]
-    )
+            )
+        )
+    return Pipeline(steps)
 
 
 def _flatten(order_lists: list[list[str]]) -> list[str]:

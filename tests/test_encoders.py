@@ -128,6 +128,7 @@ def _build_highcard_ctx(tmp_path: Path, categorical_encoding: dict[str, str] | N
         scoring="balanced_accuracy",
         prediction_aim="category",
         categorical_encoding=categorical_encoding or {},
+        prune_features=False,  # keep the (random) driver column; pruning is tested separately
         seed=0,
         data_dir=data_dir,
         storage_dir=tmp_path / "models",

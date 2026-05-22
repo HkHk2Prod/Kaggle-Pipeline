@@ -43,9 +43,14 @@ class LGBMClassifierModel(Model):
         numerical_columns = self.ctx.num_cols_x
         categorical_columns = self.ctx.cat_cols_x
 
+        # During CV each fold refits this encoder on only its training rows, so a
+        # validation fold can hold high-cardinality levels that fold never saw.
+        # The default handle_unknown="error" would raise on them; map unseen levels
+        # to -1 instead (it becomes its own ``category`` below, which LightGBM bins
+        # like any other level). Mirrors the "ordinal" strategy in encoders.py.
         cat_prep = Pipeline(
             [
-                ("ordinal", OrdinalEncoder()),
+                ("ordinal", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)),
                 ("to_cat", FunctionTransformer(lambda X: X.astype("category"))),
             ]
         )

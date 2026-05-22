@@ -21,9 +21,14 @@ KAGGLE = "kaggle"
 COLAB = "colab"
 LOCAL = "local"
 
-# Where Kaggle mounts attached datasets / competition data (one sub-dir each).
-# Module-level so tests can point it at a temporary directory.
+# Where Kaggle mounts attached datasets / competition data. Module-level so tests
+# can point it at a temporary directory.
 KAGGLE_INPUT_ROOT = Path("/kaggle/input")
+# How many levels below the input root to look for the data directory. Kaggle
+# nests competition data as /kaggle/input/competitions/<slug>/ (depth 2) and
+# datasets as /kaggle/input/<slug>/ (depth 1), so scan a few levels rather than
+# only the immediate children.
+DATA_DIR_SEARCH_DEPTH = 3
 
 
 def detect_environment() -> str:
@@ -90,42 +95,53 @@ def resolve_paths(config: Config, env: str | None = None) -> ResolvedPaths:
     return ResolvedPaths(data_dir=data_dir, storage_dir=storage_dir, working_dir=working_dir)
 
 
-def autodetect_data_dir(input_root: Path | str, competition: str | None = None) -> Path | None:
-    """Find the attached input directory that holds the competition CSVs.
+def autodetect_data_dir(
+    input_root: Path | str,
+    competition: str | None = None,
+    max_depth: int = DATA_DIR_SEARCH_DEPTH,
+) -> Path | None:
+    """Find the directory under ``input_root`` that holds the competition CSVs.
 
-    Scans the immediate sub-directories of ``input_root`` (on Kaggle each
-    attached dataset / competition mounts as one such directory) for a folder
+    Walks ``input_root`` and its sub-directories down to ``max_depth`` levels
+    (Kaggle nests competition data under ``competitions/<slug>/``) for a folder
     with both a *train* and a *test* CSV at its top level. Returns:
 
+    * the one whose name equals ``competition`` when set and matched, else
     * the single matching directory, or
-    * the one whose name equals ``competition`` when several match, or
     * ``None`` when nothing matches (the caller then falls back / errors).
 
-    Raises :class:`FileNotFoundError` when several inputs match and
+    Raises :class:`FileNotFoundError` when several directories match and
     ``competition`` does not pick one, since guessing risks silently loading the
     wrong data. The chosen directory is logged as an ``[autodetect]`` line.
     """
     root = Path(input_root)
     if not root.is_dir():
         return None
-    candidates = [d for d in sorted(root.iterdir()) if d.is_dir() and _has_train_and_test(d)]
+    candidates = [d for d in _dirs_to_depth(root, max_depth) if _has_train_and_test(d)]
     if not candidates:
         return None
-    if len(candidates) == 1:
-        _announce_data_dir(candidates[0], f"only input under {root} with train/test CSVs")
-        return candidates[0]
     if competition is not None:
         for directory in candidates:
             if directory.name == competition:
-                _announce_data_dir(
-                    directory, f"matched competition {competition!r} among {len(candidates)} inputs"
-                )
+                _announce_data_dir(directory, f"matched competition {competition!r}")
                 return directory
+    if len(candidates) == 1:
+        _announce_data_dir(candidates[0], f"only directory under {root} with train/test CSVs")
+        return candidates[0]
     raise FileNotFoundError(
-        f"Multiple inputs under {root} contain train/test CSVs "
-        f"({[d.name for d in candidates]}). Set config.competition to one of them, "
+        f"Multiple directories under {root} contain train/test CSVs "
+        f"({[str(d) for d in candidates]}). Set config.competition to one of them, "
         "or set config.data_dir explicitly."
     )
+
+
+def _dirs_to_depth(root: Path, max_depth: int):
+    """Yield ``root`` and its sub-directories down to ``max_depth`` levels deep."""
+    yield root
+    for depth in range(1, max_depth + 1):
+        for path in sorted(root.glob("/".join(["*"] * depth))):
+            if path.is_dir():
+                yield path
 
 
 def _has_train_and_test(directory: Path) -> bool:
@@ -144,12 +160,24 @@ def _resolve_kaggle_data_dir(config: Config) -> Path:
     if detected is not None:
         return detected
     if config.competition is not None:
-        # Legacy convention, kept as a fall-back when the scan finds nothing.
-        return KAGGLE_INPUT_ROOT / "competitions" / config.competition
+        # Direct fall-back paths for the named competition (the scan may miss it
+        # if the CSVs sit deeper than the search depth or are named unusually).
+        for candidate in (
+            KAGGLE_INPUT_ROOT / "competitions" / config.competition,
+            KAGGLE_INPUT_ROOT / config.competition,
+        ):
+            if candidate.is_dir():
+                return candidate
+    found = (
+        sorted(str(p) for p in KAGGLE_INPUT_ROOT.rglob("*.csv"))
+        if KAGGLE_INPUT_ROOT.is_dir()
+        else []
+    )
     raise FileNotFoundError(
-        f"Could not locate competition data under {KAGGLE_INPUT_ROOT}: no attached "
-        "input has both a train and a test CSV. Attach the competition data, or set "
-        "config.data_dir / config.competition explicitly."
+        f"Could not locate competition data under {KAGGLE_INPUT_ROOT}: no directory "
+        f"has both a train and a test CSV. CSVs found: {found or 'none'}. Attach the "
+        "competition (Add Input), or set config.data_dir to the directory containing "
+        "the train/test CSVs."
     )
 
 

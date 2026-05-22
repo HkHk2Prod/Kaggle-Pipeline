@@ -9,11 +9,6 @@ from __future__ import annotations
 import pandas as pd
 
 from kaggle_pipeline.config import Config
-from kaggle_pipeline.eda.association import (
-    association_matrix,
-    correlation_ratio,
-    cramers_v,
-)
 from kaggle_pipeline.eda.plots import EdaContext, graphs, plot
 from kaggle_pipeline.eda.reports import (
     correlation_matrices,
@@ -25,6 +20,11 @@ from kaggle_pipeline.preprocessing import (
     get_columns,
     get_predictor_names,
     split_num_cat,
+)
+from kaggle_pipeline.preprocessing.association import (
+    association_matrix,
+    correlation_ratio,
+    cramers_v,
 )
 
 __all__ = [
@@ -76,6 +76,7 @@ def run_eda(config: Config, train_df: pd.DataFrame, test_df: pd.DataFrame) -> No
         num_cols=num_cols,
         cat_cols=cat_cols,
         target=list(config.target),
+        max_plot_cats=config.max_plot_cats,
     )
 
     print_meta_data(train_df, test_df)

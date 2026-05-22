@@ -34,6 +34,17 @@ feature_expressions:
 #   region: onehot               # low-cardinality nominal
 #   grade:  ordinal
 
+# --- Feature pruning ---
+# Automatically drop predictors that are uncorrelated with the target or redundant
+# with another predictor. Thresholds are inferred from the dataset size: the
+# irrelevance cut-off shrinks as rows grow, and redundancy needs a high, noise-aware
+# confidence that the true association clears `redundancy_floor`. A predictor that
+# is uncorrelated with the target yet strongly correlated with a target-relevant
+# predictor is KEPT with a loud warning (likely suppression / leakage / non-linearity).
+prune_features: true             # set false to keep all predictors
+prune_alpha: 0.05                # significance level for the size-inferred thresholds
+redundancy_floor: 0.90           # confident association above which two predictors are redundant
+
 # --- Model search ---
 n_steps: 10                      # number of batches of models to evaluate
 num_models: 300                  # global leaderboard capacity
