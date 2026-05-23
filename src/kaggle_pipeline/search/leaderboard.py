@@ -141,6 +141,11 @@ class LeaderBoard:
     def complexity(self, name: str) -> float:
         return self._complexities[name]
 
+    def format_complexities(self) -> str:
+        """One-line, human-readable summary of each class's current complexity."""
+        formatted = {name: round(float(c), 3) for name, c in self._complexities.items()}
+        return f"Complexities of the models are {formatted}"
+
     def evaluate_models(self) -> None:
         """Adjust each class's complexity from score-per-log-compute-time.
 
@@ -167,6 +172,10 @@ class LeaderBoard:
         mean_as, std_as = all_adjusted.mean(), all_adjusted.std()
 
         for name, adj in adjusted.items():
+            # A class with no entries this round has nothing to learn from.
+            if adj.size == 0:
+                continue
+            # We add a small drift term std_as / 4 to avoid models from being stack at low complexity.
             final_score = ((adj - mean_as + 0.25 * std_as) / std_as).mean()
             final_score /= 10
             self.increase_complexity(name=name, val=final_score)
@@ -175,10 +184,21 @@ class LeaderBoard:
         return sum(len(c) for c in self.classes.values())
 
     def _pop(self, new_score: float) -> bool:
+        """Evict the board's weakest entry to make room for a ``new_score``.
+
+        Scans every class for the lowest-scoring entry that is both evictable
+        (its class would stay at or above ``lower``) and strictly worse than
+        ``new_score``, then drops it. Returns ``True`` if something was evicted,
+        ``False`` if no entry qualifies -- in which case the incoming model is
+        not good enough to displace anyone and ``add`` discards it.
+        """
         worst_score, candidate = new_score, None
-        for _name, cl in self.classes.items():
+        for _, cl in self.classes.items():
+            # Skip classes already at their lower bound -- evicting would
+            # under-fill them.
             if not cl.is_satisfied(at_lower_bound_check=True):
                 continue
+            # Entries are sorted descending, so the last one is the class worst.
             worst_in_class = cl.entries[-1]
             if worst_in_class.score < worst_score:
                 worst_score, candidate = worst_in_class.score, cl
@@ -190,6 +210,8 @@ class LeaderBoard:
 
     def add(self, class_name: str, model_entry: ModelEntry) -> None:
         score = model_entry.score
+        # If there is no room and the new entry isn't better 
+        # than anything on the board, discard it.
         if len(self) >= self.num_models and not self._pop(score):
             model_entry.delete_file()
             return
@@ -197,7 +219,7 @@ class LeaderBoard:
 
     def generate_model_entry(
         self, model: Model, score: float, compute_time: int, class_name: str
-    ) -> tuple[str, ModelEntry]:
+    ) -> ModelEntry:
         now = datetime.now()
         # A short random suffix keeps names unique even when several models of the
         # same class are saved within the same millisecond (parallel workers),
@@ -205,7 +227,7 @@ class LeaderBoard:
         model_name = class_name + now.strftime("_%Y%m%d_%H%M%S%f")[:-3] + "_" + uuid.uuid4().hex[:8]
         path = self.storage_dir / model_name
         model.save(path)
-        return class_name, ModelEntry(
+        return ModelEntry(
             score=score, name=model_name, file_path=str(path), compute_time=compute_time
         )
 
@@ -219,7 +241,7 @@ class LeaderBoard:
         output += "-" * 18 + "\n"
         for model, score in table:
             output += f"{model:<30} | {score:>10.4f}" + "\n"
-        output += f"Complexities of the models are {self._complexities}\n"
+        output += self.format_complexities() + "\n"
         return output
 
     def get(self) -> str:
@@ -257,12 +279,12 @@ class LeaderBoard:
         prob = prob / prob.sum()
         return str(rng.choice(models, p=prob))
 
-    def get_best(self, length: int = 20, min_repr: int = 0) -> list[tuple[str, str]]:
+    def get_best(self, ensemble_length: int = 20, min_repr: int = 0) -> list[tuple[str, str]]:
         """Select ensemble members: a minimum per class, then top scorers."""
-        length = min(length, len(self))
+        ensemble_length = min(ensemble_length, len(self))
         files: set[tuple[str, str]] = set()
         # Per-member listing of the chosen ensemble -- verbose only; the final
-        # ensemble's score is reported at the default level in ``Judge.predict``.
+        # ensemble's score is reported at the normal level in ``Judge.predict``.
         logger.debug("Picked models (minimal requirement):")
         if min_repr:
             for cl in self.classes.values():
@@ -277,7 +299,7 @@ class LeaderBoard:
 
         table.sort(key=lambda x: -x[0])
         for score, data in table:
-            if len(files) >= length:
+            if len(files) >= ensemble_length:
                 break
             logger.debug("Score: %s. Name: %s", score, data[0])
             files.add(data)

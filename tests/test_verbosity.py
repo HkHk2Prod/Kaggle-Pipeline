@@ -24,8 +24,8 @@ def test_level_for_verbosity_rejects_unknown():
         level_for_verbosity("loud")
 
 
-def test_config_defaults_to_normal():
-    assert Config().verbosity == "normal"
+def test_config_defaults_to_verbose():
+    assert Config().verbosity == "verbose"
 
 
 def test_config_rejects_unknown_verbosity():

@@ -20,7 +20,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    config_help = "Path to a YAML config file (see configs/ for an example)."
+    config_help = (
+        "Path to a YAML config file whose keys map onto Config fields. Omit to use "
+        "defaults that autodetect everything from the data (notebook style)."
+    )
 
     # Shared --verbose/--quiet flags so both subcommands accept them after the
     # command name (e.g. ``kaggle-pipeline run -c cfg.yaml -v``). When given they
@@ -40,14 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser = sub.add_parser(
         "run", parents=[verbosity], help="Train and write a submission from a YAML config."
     )
-    run_parser.add_argument("--config", "-c", required=True, help=config_help)
+    run_parser.add_argument("--config", "-c", help=config_help)
 
     analyze_parser = sub.add_parser(
         "analyze",
         parents=[verbosity],
         help="Run exploratory data analysis (plots + reports) from a YAML config.",
     )
-    analyze_parser.add_argument("--config", "-c", required=True, help=config_help)
+    analyze_parser.add_argument("--config", "-c", help=config_help)
     return parser
 
 
@@ -61,7 +64,9 @@ def _apply_cli_verbosity(config: Config, args: argparse.Namespace) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = Config.from_yaml(args.config)
+    # No --config: fall back to a bare Config() that autodetects every field from
+    # the data, exactly like a default Config() in the runner notebook.
+    config = Config.from_yaml(args.config) if args.config else Config()
     _apply_cli_verbosity(config, args)
     # The entry points (run/analyze) configure the package logger from
     # ``config.verbosity``, so the level reflects the flag override above.
