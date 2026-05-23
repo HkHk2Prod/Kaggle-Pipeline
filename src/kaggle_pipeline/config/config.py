@@ -73,7 +73,7 @@ class Config:
 
     # --- Feature engineering ------------------------------------------------
     # ``df.eval`` expressions applied by FeatureEngineer, e.g.
-    #   "soil_lt_25 = Soil_Moisture < 25".
+    #   "is_low = some_feature < 25".
     feature_expressions: list[str] = field(default_factory=list)
     order_lists: list[list[str]] = field(default_factory=lambda: list(DEFAULT_ORDER_LISTS))
     # How each categorical predictor is encoded *for models that cannot consume a
@@ -128,7 +128,6 @@ class Config:
 
     # --- Cross-validation ---------------------------------------------------
     cv_splits: int = 5
-    cv_seed: int = 42
 
     # --- Runtime ------------------------------------------------------------
     # Cut the dataset to speed things up; use for debugging only.
@@ -137,15 +136,19 @@ class Config:
     speed_up_test_rows: int = 500
     # Global running-time limit in seconds (Kaggle kernels cap at 12h).
     max_running_time: int = 43200
-    # Random seed for the whole run. A fixed default makes a run reproducible
-    # (same seed -> same leaderboard and submission); set to ``None`` for
-    # non-reproducible behaviour (the original notebook's default).
-    seed: int | None = 42
+    # The single random seed for the whole run: model hyperparameter sampling,
+    # the leaderboard's class selection, the cross-validation fold shuffling and
+    # the ensemble search all derive from it. Set it to an int to make a run
+    # fully reproducible (same seed -> same folds, leaderboard and submission);
+    # the default ``None`` leaves every random process unseeded (non-reproducible,
+    # as in the original notebook).
+    seed: int | None = None
     # How much the pipeline prints as it runs. One of 'quiet' (warnings/errors
-    # only), 'normal' (stage progress + autodetect/prune summaries, the default)
-    # or 'verbose' (adds per-model scores, the full leaderboard each step and the
-    # encoding plan). Mapped to a logging level on the package logger; the CLI
-    # ``-v``/``-q`` flags override it. See :mod:`kaggle_pipeline.logconfig`.
+    # only), 'normal' (stage progress + autodetect/prune summaries + each model's
+    # score and timing) or 'verbose' (the default: adds the sampled per-model
+    # parameters, the full leaderboard each step and the encoding plan). Mapped to
+    # a logging level on the package logger; the CLI ``-v``/``-q`` flags override
+    # it. See :mod:`kaggle_pipeline.logconfig`.
     verbosity: str = DEFAULT_VERBOSITY
 
     # --- I/O ----------------------------------------------------------------

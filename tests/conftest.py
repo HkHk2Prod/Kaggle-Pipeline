@@ -67,7 +67,6 @@ def smoke_config(synthetic_data_dir: Path, tmp_path: Path) -> Config:
         ensemble_length=8,
         ensemble_min_repr=1,
         cv_splits=3,
-        cv_seed=42,
         seed=0,
         data_dir=synthetic_data_dir,
         storage_dir=tmp_path / "models",

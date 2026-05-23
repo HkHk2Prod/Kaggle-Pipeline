@@ -17,10 +17,12 @@ logging level by :func:`level_for_verbosity`:
 
 * ``"quiet"`` -> ``WARNING``: only warnings and errors (autodetect anomalies,
   a corrupt leaderboard, an exhausted time budget).
-* ``"normal"`` -> ``INFO`` (the default): stage progress, the autodetected
-  fields, the prune summary, the chosen ensemble's score and the submission path.
-* ``"verbose"`` -> ``DEBUG``: everything above plus the per-model scores, the
-  full leaderboard after each step, the encoding plan and the submission preview.
+* ``"normal"`` -> ``INFO``: stage progress, the autodetected fields, the prune
+  summary, each tested model's score and timing, the final model complexities at
+  the end of training, the chosen ensemble's score and the submission path.
+* ``"verbose"`` -> ``DEBUG`` (the default): everything above plus each model's
+  sampled parameters, the full leaderboard (with complexities) after each step,
+  the encoding plan and the submission preview.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ VERBOSITY_LEVELS: dict[str, int] = {
     "normal": logging.INFO,
     "verbose": logging.DEBUG,
 }
-DEFAULT_VERBOSITY = "normal"
+DEFAULT_VERBOSITY = "verbose"
 
 
 def level_for_verbosity(verbosity: str) -> int:

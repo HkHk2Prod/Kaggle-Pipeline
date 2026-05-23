@@ -35,10 +35,3 @@ def test_run_writes_submission(smoke_config: Config, tmp_path, monkeypatch):
     assert len(submission) == 80
     assert list(submission.columns) == ["id", "y"]
     assert set(submission["y"]).issubset({"no", "yes"})
-
-
-def test_example_yaml_config_loads():
-    cfg = Config.from_yaml("configs/playground-s6e4.yaml")
-    assert cfg.target == ["Irrigation_Need"]
-    assert cfg.scoring == "balanced_accuracy"
-    assert len(cfg.feature_expressions) == 4

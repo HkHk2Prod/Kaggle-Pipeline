@@ -130,7 +130,7 @@ def test_autodetect_data_dir_ambiguous_raises(tmp_path: Path):
 
 def test_resolve_paths_kaggle_autodetects_data_dir(tmp_path: Path, monkeypatch):
     inp = tmp_path / "input"
-    comp = _make_input_dir(inp, "playground-series-s6e4")
+    comp = _make_input_dir(inp, "some-competition")
     monkeypatch.setattr(envmod, "KAGGLE_INPUT_ROOT", inp)
     # competition + data_dir both unset; storage_dir set so mkdir stays in tmp.
     cfg = Config(storage_dir=tmp_path / "models")

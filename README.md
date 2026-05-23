@@ -53,7 +53,6 @@ src/kaggle_pipeline/
 ├── pipeline.py     # run() — the training entry point
 ├── analysis.py     # analyze() — the standalone EDA entry point
 └── cli.py          # `kaggle-pipeline run|analyze --config ...`
-configs/            # example YAML config (Playground Series S6E4)
 notebooks/          # kaggle_runner.ipynb — the thin notebook to upload to Kaggle
 tests/              # unit + end-to-end smoke tests
 ```
@@ -67,14 +66,12 @@ these cells. Enable **Internet** in the notebook settings.
 # 1. Install (pin a tag for reproducibility, e.g. @v0.1.0)
 !pip install -q git+https://github.com/HkHk2Prod/Kaggle-Pipeline.git
 
-# 2. Configure — the few things that change per competition
+# 2. Configure — on Kaggle most fields autodetect from the data, so a bare
+#    Config() often works. Set only what you need to override per competition.
 from kaggle_pipeline import Config
 cfg = Config(
-    competition="playground-series-s6e4",
-    target="Irrigation_Need",
-    scoring="balanced_accuracy",
-    prediction_aim="category",
-    feature_expressions=["soil_lt_25 = Soil_Moisture < 25"],
+    # target / task / scoring / prediction_aim autodetect when left unset.
+    feature_expressions=["new_flag = some_column < 25"],  # optional engineered columns
 )
 
 # 3. Run
@@ -94,15 +91,15 @@ uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 
 # Train from a YAML config (set data_dir to your local data folder)
-.venv/bin/kaggle-pipeline run --config configs/playground-s6e4.yaml
+.venv/bin/kaggle-pipeline run --config path/to/config.yaml
 
 # Or explore the data first (separate, no training). EDA is opt-in:
 # set `run_eda: true` in the config -- otherwise analyze logs that it's
 # disabled and exits without rendering.
-.venv/bin/kaggle-pipeline analyze --config configs/playground-s6e4.yaml
+.venv/bin/kaggle-pipeline analyze --config path/to/config.yaml
 
 # Add -v for verbose output (per-model scores, full leaderboard) or -q to quiet it
-.venv/bin/kaggle-pipeline run --config configs/playground-s6e4.yaml -v
+.venv/bin/kaggle-pipeline run --config path/to/config.yaml -v
 ```
 
 Or from Python:
@@ -110,7 +107,7 @@ Or from Python:
 ```python
 from kaggle_pipeline import Config, run, analyze
 
-cfg = Config.from_yaml("configs/playground-s6e4.yaml")
+cfg = Config.from_yaml("path/to/config.yaml")
 cfg.run_eda = True  # EDA is opt-in (run_eda defaults to False)
 analyze(cfg)        # optional: render EDA only
 run(cfg)            # train + write submission (ignores run_eda)
@@ -118,8 +115,9 @@ run(cfg)            # train + write submission (ignores run_eda)
 
 ## Configuration
 
-All knobs live in one `Config` object (see [`configs/playground-s6e4.yaml`](configs/playground-s6e4.yaml)
-for a documented example). The most important fields:
+All knobs live in one `Config` object — set them in Python or load them from a
+YAML file with `Config.from_yaml(path)` (keys map one-to-one onto the fields).
+The most important fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -277,15 +275,18 @@ those are pulled in only for the standalone `analyze` flow. Dev extras
 
 - The original exploratory notebook is preserved untouched as
   [`Kaggle_Pipeline.ipynb`](Kaggle_Pipeline.ipynb) for reference.
-- Runs are reproducible by default: `Config.seed` defaults to `42` and threads
-  through the model search, the leaderboard's class selection and the ensemble
-  search. Set `seed=None` for non-reproducible behaviour (the notebook default).
+- A single `Config.seed` controls all randomness: the model search, the
+  leaderboard's class selection, the cross-validation fold shuffling and the
+  ensemble search all derive from it. It defaults to `None` (non-reproducible,
+  the original notebook's behaviour); set it to an int for a fully reproducible
+  run (same seed -> same folds, leaderboard and submission).
 - Progress output goes through Python's `logging` (the `kaggle_pipeline` logger)
   rather than `print`. How much is shown is the `verbosity` config field:
-  `quiet` (warnings/errors only), `normal` (the default: stage progress plus the
-  autodetected fields, prune summary, chosen-ensemble score and submission path)
-  or `verbose` (adds per-model scores, the full leaderboard after each step, the
-  encoding plan and a submission preview). The CLI flags `-v`/`--verbose` and
+  `quiet` (warnings/errors only), `normal` (stage progress plus the autodetected
+  fields, prune summary, each tested model's score and timing, chosen-ensemble
+  score and submission path) or `verbose` (the default: adds the sampled
+  per-model parameters, the full leaderboard after each step, the encoding plan
+  and a submission preview). The CLI flags `-v`/`--verbose` and
   `-q`/`--quiet` override the config value, e.g.
   `kaggle-pipeline run -c config.yaml -v`. Embedders can still configure the
   `kaggle_pipeline` logger directly to redirect or filter output.

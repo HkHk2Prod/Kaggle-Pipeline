@@ -4,7 +4,7 @@ Typical usage from a Kaggle notebook::
 
     from kaggle_pipeline import Config, run
 
-    cfg = Config(competition="playground-series-s6e4", target="Irrigation_Need", ...)
+    cfg = Config()  # on Kaggle, competition/target/task/scoring autodetect from the data
     run(cfg)  # loads data, searches models, ensembles, writes submission.csv
 """
 

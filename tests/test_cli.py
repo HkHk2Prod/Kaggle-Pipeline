@@ -48,3 +48,28 @@ def test_parser_requires_a_subcommand():
     # argparse exits with code 2 when the required subcommand is missing.
     with pytest.raises(SystemExit):
         build_parser().parse_args([])
+
+
+def test_config_is_optional():
+    # --config may be omitted (defaults to None); the subcommand still parses.
+    assert build_parser().parse_args(["run"]).config is None
+
+
+def test_run_without_config_uses_autodetecting_default(monkeypatch):
+    # With no --config, main() builds a bare Config() whose problem-definition
+    # fields are all left for autodetection (notebook style).
+    captured = {}
+
+    def fake_run(config):
+        captured["config"] = config
+        return Path("submission.csv")
+
+    monkeypatch.setattr("kaggle_pipeline.cli.run", fake_run)
+    rc = main(["run"])
+
+    assert rc == 0
+    cfg = captured["config"]
+    assert cfg.competition is None
+    assert cfg.target is None
+    assert cfg.scoring is None
+    assert cfg.prediction_aim is None
