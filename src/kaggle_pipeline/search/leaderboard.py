@@ -210,7 +210,7 @@ class LeaderBoard:
 
     def add(self, class_name: str, model_entry: ModelEntry) -> None:
         score = model_entry.score
-        # If there is no room and the new entry isn't better 
+        # If there is no room and the new entry isn't better
         # than anything on the board, discard it.
         if len(self) >= self.num_models and not self._pop(score):
             model_entry.delete_file()
@@ -250,11 +250,10 @@ class LeaderBoard:
         Prioritises classes that have not yet reached their lower bound; among
         saturated classes it samples proportionally to a softmax of mean scores.
         The class lookup is shuffled so repeated calls don't always return the
-        first unsatisfied class. All randomness draws from a child of the run's
-        seed sequence, so with a fixed ``seed`` the search is reproducible.
+        first unsatisfied class.
         """
         models: list[str] = []
-        scores: list[float] = []
+        scores: list[float | None] = []
         rng = np.random.default_rng(self.seed_seq.spawn(1)[0])
         items = list(self.classes.items())
         rng.shuffle(items)
@@ -267,7 +266,7 @@ class LeaderBoard:
             scores.append(cl.mean_score())
         prob = np.array(scores, dtype=float)
         finite = np.isfinite(prob)
-        # No saturated classes, or none with a usable mean score: pick uniformly.
+        # No saturated classes and none with a usable mean score: pick uniformly.
         if not finite.any():
             return str(rng.choice(list(self.classes.keys())))
         # Treat any missing class mean as the lowest score so it is least likely.

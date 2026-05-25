@@ -49,7 +49,6 @@ def build_pretrain_pipeline(config: Config) -> Pipeline:
                     id_col=config.id_col,
                     alpha=config.prune_alpha,
                     redundancy_floor=config.redundancy_floor,
-                    cat_cutoff=config.cat_cutoff,
                 ),
             )
         )

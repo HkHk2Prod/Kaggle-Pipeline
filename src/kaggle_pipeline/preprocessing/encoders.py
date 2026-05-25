@@ -7,7 +7,10 @@ the categoricals turned into numbers first.
 
 This module decides *how* each categorical predictor is encoded for those
 models. The choice is per column and user-controlled via
-``Config.categorical_encoding``; any column left unspecified defaults to
+``Config.categorical_encoding``. A column left unspecified gets a
+cardinality-based default: low-cardinality columns (at most
+:data:`ONEHOT_MAX_CARDINALITY` distinct levels) one-hot encode without bloating
+the feature count, so they default to ``onehot``; anything wider falls back to
 :data:`DEFAULT_STRATEGY` (frequency encoding). :func:`resolve_encoding_plan`
 fills in the defaults and logs the per-column ``[encoding]`` plan at DEBUG (so it
 appears under ``verbosity='verbose'``), and :func:`categorical_transformer_specs`
@@ -37,6 +40,10 @@ ENCODING_STRATEGIES: frozenset[str] = frozenset(
     {"native", "frequency", "target", "onehot", "ordinal", "drop"}
 )
 DEFAULT_STRATEGY = "frequency"
+# An unconfigured categorical with at most this many distinct levels defaults to
+# one-hot encoding (cheap and lossless at low cardinality); wider columns fall
+# back to DEFAULT_STRATEGY so one-hot can't explode the feature count.
+ONEHOT_MAX_CARDINALITY = 20
 
 
 class FrequencyEncoder(BaseEstimator, TransformerMixin):
@@ -68,23 +75,45 @@ class FrequencyEncoder(BaseEstimator, TransformerMixin):
         return np.asarray(self.feature_names_in_, dtype=object)
 
 
+def _default_strategy(train_df: pd.DataFrame, col: str, onehot_max_cardinality: int) -> str:
+    """Pick the default encoding for a categorical column not set by the user.
+
+    Columns with at most ``onehot_max_cardinality`` distinct levels one-hot
+    encode without inflating the feature count, so they default to ``onehot``;
+    wider columns (or any column missing from ``train_df``, whose cardinality we
+    can't measure) fall back to :data:`DEFAULT_STRATEGY`.
+    """
+    if col in train_df.columns and train_df[col].nunique() <= onehot_max_cardinality:
+        return "onehot"
+    return DEFAULT_STRATEGY
+
+
 def resolve_encoding_plan(
     categorical_encoding: dict[str, str],
     train_df: pd.DataFrame,
     cat_cols_x: Sequence[str],
     *,
+    onehot_max_cardinality: int | None = None,
     announce: bool = True,
 ) -> dict[str, str]:
     """Return ``{column -> strategy}`` for every categorical predictor.
 
-    Columns absent from ``categorical_encoding`` default to
-    :data:`DEFAULT_STRATEGY`. Configured columns that are not categorical
+    A column absent from ``categorical_encoding`` gets a cardinality-based
+    default (``onehot`` at or below ``onehot_max_cardinality`` levels, else
+    :data:`DEFAULT_STRATEGY`); ``onehot_max_cardinality=None`` falls back to
+    :data:`ONEHOT_MAX_CARDINALITY`. Configured columns that are not categorical
     predictors are reported but ignored. When ``announce`` is set, logs one
     ``[encoding]`` line per column (with its cardinality) plus a header making
     the capability-wins rule explicit.
     """
+    threshold = ONEHOT_MAX_CARDINALITY if onehot_max_cardinality is None else onehot_max_cardinality
     cat_set = list(cat_cols_x)
-    plan = {col: categorical_encoding.get(col, DEFAULT_STRATEGY) for col in cat_set}
+    plan = {
+        col: categorical_encoding[col]
+        if col in categorical_encoding
+        else _default_strategy(train_df, col, threshold)
+        for col in cat_set
+    }
 
     if announce:
         unknown_cols = sorted(set(categorical_encoding) - set(cat_set))

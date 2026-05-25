@@ -13,6 +13,7 @@ from kaggle_pipeline.models import registry
 from kaggle_pipeline.models.definitions.hist_gb import HistGBClassifierModel
 from kaggle_pipeline.pipeline import build_pipeline
 from kaggle_pipeline.preprocessing import (
+    ONEHOT_MAX_CARDINALITY,
     FrequencyEncoder,
     categorical_transformer_specs,
     resolve_encoding_plan,
@@ -42,16 +43,44 @@ def test_frequency_encoder_is_one_column_in_one_column_out():
 # --------------------------------------------------------------------------- #
 # Plan resolution
 # --------------------------------------------------------------------------- #
-def test_resolve_plan_defaults_unspecified_to_frequency():
+def test_resolve_plan_defaults_low_cardinality_to_onehot():
+    # Both columns have 2 levels (<= ONEHOT_MAX_CARDINALITY), so the unspecified
+    # "city" defaults to onehot; the explicit "driver" override still wins.
     df = pd.DataFrame({"driver": ["a", "b"], "city": ["x", "y"]})
     plan = resolve_encoding_plan({"driver": "target"}, df, ["driver", "city"], announce=False)
-    assert plan == {"driver": "target", "city": "frequency"}
+    assert plan == {"driver": "target", "city": "onehot"}
+
+
+def test_resolve_plan_defaults_high_cardinality_to_frequency():
+    # A column with more than ONEHOT_MAX_CARDINALITY levels would explode under
+    # one-hot, so the unspecified default falls back to frequency.
+    df = pd.DataFrame({"driver": [f"d{i}" for i in range(ONEHOT_MAX_CARDINALITY + 1)]})
+    plan = resolve_encoding_plan({}, df, ["driver"], announce=False)
+    assert plan == {"driver": "frequency"}
 
 
 def test_resolve_plan_ignores_non_categorical_columns():
     df = pd.DataFrame({"driver": ["a", "b"]})
     plan = resolve_encoding_plan({"ghost": "onehot"}, df, ["driver"], announce=False)
-    assert plan == {"driver": "frequency"}  # "ghost" is not a categorical predictor
+    # "ghost" is not a categorical predictor; "driver" (2 levels) defaults to onehot.
+    assert plan == {"driver": "onehot"}
+
+
+def test_resolve_plan_respects_explicit_onehot_max_cardinality():
+    # With the cut-off lowered to 1, a 2-level column is now "high" cardinality
+    # and falls back to frequency instead of the onehot it would get by default.
+    df = pd.DataFrame({"city": ["x", "y"]})
+    plan = resolve_encoding_plan({}, df, ["city"], onehot_max_cardinality=1, announce=False)
+    assert plan == {"city": "frequency"}
+
+
+def test_resolve_plan_onehot_max_cardinality_none_uses_module_default():
+    # None means "use ONEHOT_MAX_CARDINALITY": a column at exactly the default
+    # cut-off still one-hots, one level above it does not.
+    at_cap = pd.DataFrame({"c": [f"v{i}" for i in range(ONEHOT_MAX_CARDINALITY)]})
+    above_cap = pd.DataFrame({"c": [f"v{i}" for i in range(ONEHOT_MAX_CARDINALITY + 1)]})
+    assert resolve_encoding_plan({}, at_cap, ["c"], announce=False) == {"c": "onehot"}
+    assert resolve_encoding_plan({}, above_cap, ["c"], announce=False) == {"c": "frequency"}
 
 
 # --------------------------------------------------------------------------- #
@@ -85,6 +114,11 @@ def test_specs_support_ordinal_and_drop():
 def test_config_rejects_unknown_encoding_strategy():
     with pytest.raises(ValueError, match="Unknown categorical_encoding"):
         Config(competition="x", categorical_encoding={"driver": "bogus"})
+
+
+def test_config_rejects_non_positive_onehot_max_cardinality():
+    with pytest.raises(ValueError, match="onehot_max_cardinality must be a positive int"):
+        Config(competition="x", onehot_max_cardinality=0)
 
 
 # --------------------------------------------------------------------------- #

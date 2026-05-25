@@ -33,15 +33,28 @@ def cramers_v(x: pd.Series, y: pd.Series) -> float:
 
     Uses the Bergsma (2013) correction so the value does not inflate with the
     number of categories -- important precisely for high-cardinality columns.
-    Returns ``0.0`` for degenerate inputs (a single category on either side).
+    Returns ``0.0`` for degenerate inputs (a single category on either side) and
+    for an id-like column with a distinct value in (almost) every row: there the
+    correction's denominator collapses to ``<= 0``, so the result is ``0.0`` by
+    construction. Those cases are caught by a cheap ``O(n)`` guard *before* the
+    ``r x k`` contingency table is materialised, so a near-unique column never
+    builds a huge crosstab only to read ~0.
     """
-    confusion = pd.crosstab(x, y)
+    paired = pd.DataFrame({"x": x, "y": y}).dropna()
+    n = len(paired)
+    if n == 0:
+        return 0.0
+    # A single observed category carries no association; a distinct value per row
+    # (r >= n) drives ``r_corr - 1`` to <= 0 below. Both yield exactly 0.0, so skip
+    # the crosstab. Numeric results for every non-degenerate input are unchanged.
+    if min(paired["x"].nunique(), paired["y"].nunique()) < 2:
+        return 0.0
+    if paired["x"].nunique() >= n or paired["y"].nunique() >= n:
+        return 0.0
+    confusion = pd.crosstab(paired["x"], paired["y"])
     if confusion.size == 0 or min(confusion.shape) < 2:
         return 0.0
     chi2 = _chi2_statistic(confusion.to_numpy(dtype=float))
-    n = confusion.to_numpy().sum()
-    if n == 0:
-        return 0.0
     phi2 = chi2 / n
     r, k = confusion.shape
     # Bias correction.

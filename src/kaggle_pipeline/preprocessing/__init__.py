@@ -16,6 +16,7 @@ from kaggle_pipeline.preprocessing.columns import (
 from kaggle_pipeline.preprocessing.encoders import (
     DEFAULT_STRATEGY,
     ENCODING_STRATEGIES,
+    ONEHOT_MAX_CARDINALITY,
     FrequencyEncoder,
     categorical_transformer_specs,
     resolve_encoding_plan,
@@ -53,6 +54,7 @@ __all__ = [
     "FrequencyEncoder",
     "ENCODING_STRATEGIES",
     "DEFAULT_STRATEGY",
+    "ONEHOT_MAX_CARDINALITY",
     "resolve_encoding_plan",
     "categorical_transformer_specs",
     "association_matrix",
