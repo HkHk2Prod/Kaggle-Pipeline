@@ -112,7 +112,12 @@ def build_context(config: Config, datasets: Datasets, paths: ResolvedPaths) -> P
     num_cols_x, cat_cols_x = split_num_cat(
         predictor_columns, train_df, cat_cutoff=config.cat_cutoff
     )
-    categorical_encoding = resolve_encoding_plan(config.categorical_encoding, train_df, cat_cols_x)
+    categorical_encoding = resolve_encoding_plan(
+        config.categorical_encoding,
+        train_df,
+        cat_cols_x,
+        onehot_max_cardinality=config.onehot_max_cardinality,
+    )
 
     target_transforms = build_target_transforms(
         train_df,

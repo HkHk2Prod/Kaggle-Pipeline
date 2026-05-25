@@ -181,13 +181,11 @@ class CorrelationPruner(BaseEstimator, TransformerMixin):
         id_col: Sequence[str] | None = None,
         alpha: float = 0.05,
         redundancy_floor: float = 0.90,
-        cat_cutoff: int = 5,
     ):
         self.target = target
         self.id_col = id_col
         self.alpha = alpha
         self.redundancy_floor = redundancy_floor
-        self.cat_cutoff = cat_cutoff
 
     def fit(self, X, y=None):
         X = pd.DataFrame(X)
@@ -200,8 +198,12 @@ class CorrelationPruner(BaseEstimator, TransformerMixin):
             return self
 
         tcol = target[0]
-        num_pred, cat_pred = split_num_cat(predictors, X, cat_cutoff=self.cat_cutoff)
-        t_num, t_cat = split_num_cat([tcol], X, cat_cutoff=self.cat_cutoff)
+        # Classification is by dtype, consistent with the rest of the modelling
+        # pipeline (CategoricalTyper / OrdinalEncoder settle dtypes upstream).
+        # The cat_cutoff "low-cardinality numeric counts as categorical" rule is
+        # deliberately graph-only -- see is_num_check(for_graph=...).
+        num_pred, cat_pred = split_num_cat(predictors, X)
+        t_num, t_cat = split_num_cat([tcol], X)
         matrix, _, _ = association_matrix(
             X[predictors + [tcol]], num_pred + t_num, cat_pred + t_cat
         )

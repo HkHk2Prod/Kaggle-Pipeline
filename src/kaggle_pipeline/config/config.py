@@ -78,11 +78,17 @@ class Config:
     order_lists: list[list[str]] = field(default_factory=lambda: list(DEFAULT_ORDER_LISTS))
     # How each categorical predictor is encoded *for models that cannot consume a
     # raw categorical column* (RandomForest, LogisticRegression). Maps a column
-    # name to a strategy in ``ENCODING_STRATEGIES``; columns left out default to
-    # frequency encoding. Capability wins: models that handle categoricals
-    # natively (CatBoost, XGBoost, LightGBM, HistGB) always get the raw column
-    # and ignore this map (HistGB excepted above its native cardinality cap).
+    # name to a strategy in ``ENCODING_STRATEGIES``; a column left out gets a
+    # cardinality-based default (see ``onehot_max_cardinality``). Capability wins:
+    # models that handle categoricals natively (CatBoost, XGBoost, LightGBM,
+    # HistGB) always get the raw column and ignore this map (HistGB excepted above
+    # its native cardinality cap).
     categorical_encoding: dict[str, str] = field(default_factory=dict)
+    # Cardinality cut-off for the default encoding of a categorical not named in
+    # ``categorical_encoding``: at or below this many distinct levels it defaults
+    # to one-hot (cheap and lossless when narrow), above it to frequency. ``None``
+    # (the default) falls back to ``encoders.ONEHOT_MAX_CARDINALITY`` (20).
+    onehot_max_cardinality: int | None = None
 
     # --- Exploratory data analysis ------------------------------------------
     # Whether ``analyze`` renders the EDA suite (metadata, correlation/association
@@ -186,6 +192,11 @@ class Config:
             raise ValueError(f"prune_alpha must be in (0, 1), got {self.prune_alpha}.")
         if not 0.0 <= self.redundancy_floor <= 1.0:
             raise ValueError(f"redundancy_floor must be in [0, 1], got {self.redundancy_floor}.")
+        if self.onehot_max_cardinality is not None and self.onehot_max_cardinality < 1:
+            raise ValueError(
+                f"onehot_max_cardinality must be a positive int or None, "
+                f"got {self.onehot_max_cardinality}."
+            )
         if self.verbosity not in VERBOSITY_LEVELS:
             raise ValueError(
                 f"verbosity must be one of {sorted(VERBOSITY_LEVELS)}, got {self.verbosity!r}."
