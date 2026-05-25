@@ -18,6 +18,17 @@ import pandas as pd
 from joblib import Parallel, delayed
 from scipy.stats import loguniform
 
+# sklearn runs ``import polars`` lazily inside its array-type checks (e.g. on the
+# first ``fit``). Triggering that first import concurrently from the worker
+# threads in ``step`` (``prefer="threads"``) races and can leave the module
+# half-initialised -- "partially initialized module 'polars' has no attribute
+# 'DataFrame'". Import it once here, in the main thread, so it is fully loaded
+# before any threads start. polars may be absent off Kaggle, so guard the import.
+try:
+    import polars  # noqa: F401  (eager import to dodge a threaded init race in sklearn)
+except ImportError:
+    pass
+
 from kaggle_pipeline.context import PipelineContext
 from kaggle_pipeline.models import Model, registry
 from kaggle_pipeline.search.cv import CrossValScore
