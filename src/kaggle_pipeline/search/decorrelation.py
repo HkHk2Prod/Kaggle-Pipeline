@@ -125,6 +125,4 @@ def select_redundant_indices(
     z: float = Z_ONE_SIDED_95,
 ) -> set[int]:
     """Convenience wrapper of :func:`select_redundant` that standardises first."""
-    return select_redundant(
-        [standardize(r) for r in residuals], n_eff=n_eff, tau=tau, z=z
-    )
+    return select_redundant([standardize(r) for r in residuals], n_eff=n_eff, tau=tau, z=z)

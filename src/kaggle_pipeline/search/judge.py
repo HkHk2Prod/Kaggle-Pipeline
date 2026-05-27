@@ -182,9 +182,7 @@ class Judge:
         units = [self._residual_unit(entry) for entry, _cl in entries]
         # n_eff is the number of training rows: the confidence bound on each
         # residual correlation widens (so we prune less) as the dataset shrinks.
-        drop = select_redundant(
-            units, n_eff=len(self.y), tau=self.ctx.config.correlation_tau
-        )
+        drop = select_redundant(units, n_eff=len(self.y), tau=self.ctx.config.correlation_tau)
         for i in sorted(drop, reverse=True):
             entry, cl = entries[i]
             cl.entries.remove(entry)
