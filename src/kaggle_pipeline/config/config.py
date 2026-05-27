@@ -131,6 +131,19 @@ class Config:
     n_workers: int = -1
     ensemble_length: int = 30
     ensemble_min_repr: int = 1
+    # --- Ensemble de-correlation -------------------------------------------
+    # Before building the final ensemble, permanently drop any model whose
+    # out-of-fold *residuals* (y - y_oof) are confidently correlated with a
+    # better-scoring model's. Such a model makes the same mistakes and adds
+    # nothing to the stack -- it is what makes "ensembling do nothing" when one
+    # model class dominates the leaderboard with near-identical copies of itself.
+    # On by default (see :mod:`kaggle_pipeline.search.decorrelation`).
+    prune_correlated_models: bool = True
+    # Redundancy threshold on the residual correlation's *lower confidence bound*
+    # (Fisher z, one-sided 95%; the bound widens as the dataset shrinks). For a
+    # large dataset this is effectively "drop models whose residuals correlate
+    # above 0.98"; on smaller data a higher observed correlation is required.
+    correlation_tau: float = 0.98
 
     # --- Cross-validation ---------------------------------------------------
     cv_splits: int = 5
@@ -192,6 +205,8 @@ class Config:
             raise ValueError(f"prune_alpha must be in (0, 1), got {self.prune_alpha}.")
         if not 0.0 <= self.redundancy_floor <= 1.0:
             raise ValueError(f"redundancy_floor must be in [0, 1], got {self.redundancy_floor}.")
+        if not 0.0 <= self.correlation_tau <= 1.0:
+            raise ValueError(f"correlation_tau must be in [0, 1], got {self.correlation_tau}.")
         if self.onehot_max_cardinality is not None and self.onehot_max_cardinality < 1:
             raise ValueError(
                 f"onehot_max_cardinality must be a positive int or None, "
