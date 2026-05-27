@@ -1,10 +1,13 @@
 """The :class:`Judge` -- orchestrates the model search and final ensembling.
 
 Each ``step`` draws a batch of model classes from the leaderboard, samples and
-cross-validates a model from each (in parallel threads), records the scores and
-adapts complexities. After the search, ``predict`` stacks the selected models'
-out-of-fold predictions with a logistic-regression meta-model and returns the
-decoded test predictions.
+cross-validates a model from each (in parallel threads), records the scores,
+adapts complexities and then permanently drops models whose out-of-fold residuals
+just duplicate a better one's mistakes (``prune_correlated_models``; see
+:mod:`kaggle_pipeline.search.decorrelation`) -- so de-correlation happens as the
+board grows rather than only at the end. After the search ``predict`` stacks the
+surviving models' out-of-fold predictions with a logistic-regression meta-model
+and returns the decoded test predictions.
 """
 
 from __future__ import annotations
@@ -32,6 +35,7 @@ except ImportError:
 from kaggle_pipeline.context import PipelineContext
 from kaggle_pipeline.models import Model, registry
 from kaggle_pipeline.search.cv import CrossValScore
+from kaggle_pipeline.search.decorrelation import select_redundant, standardize
 from kaggle_pipeline.search.leaderboard import LeaderBoard, ModelEntry
 
 logger = logging.getLogger(__name__)
@@ -56,6 +60,11 @@ class Judge:
         )
         for cls_name, lower, upper in model_list:
             self.board.add_class(cls_name, lower, upper)
+        # Standardised OOF residual per board entry (keyed by entry name), so each
+        # model is loaded and residualised once across the whole search rather than
+        # re-read from disk on every batch's de-correlation pass. Pruned back to the
+        # live board each pass so evicted models don't leak (see prune_correlated_models).
+        self._residual_units: dict[str, np.ndarray | None] = {}
 
     def _evaluate_one(self, cls_name, X, y, splits, rng=None):
         timer = time.perf_counter()
@@ -105,6 +114,10 @@ class Judge:
             logger.debug("%s", params_msg)
             self.board.add(cls_name, entry)
         self.board.evaluate_models()
+        # De-correlate after every batch: as the new models join the board, drop any
+        # that just duplicate a better model's mistakes so a dominant class can't
+        # crowd the board (and later the ensemble) with near-copies of itself.
+        self.prune_correlated_models()
 
         timer = time.perf_counter() - timer
         time_spent = time.strftime("%H:%M:%S", time.gmtime(timer))
@@ -113,6 +126,85 @@ class Judge:
         logger.debug("%s", self)
         logger.info("Tested a batch of %d model(s). It took %s.", batch_size, time_spent)
         return timer
+
+    def _oof_residual(self, oof: np.ndarray) -> np.ndarray:
+        """Flatten a model's residual ``y - y_oof`` into a single vector.
+
+        Redundancy is measured on residuals, not raw OOF probabilities, so two
+        models count as redundant only when they make the *same* errors. ``oof``
+        column ``j`` is ``P(class j)`` (``CrossValScore`` drops the last class for
+        multiclass), so the matching true-class indicator is ``I(y == j)``.
+        """
+        oof = np.asarray(oof, dtype=float)
+        if oof.ndim == 1:
+            oof = oof[:, None]
+        indicator = (self.y[:, None] == np.arange(oof.shape[1])).astype(float)
+        return (indicator - oof).ravel()
+
+    def _residual_unit(self, entry: ModelEntry) -> np.ndarray | None:
+        """Cached, standardised OOF residual for a board entry (loaded once).
+
+        The standardised residual never changes once a model is on the board, so it
+        is computed the first time the entry is seen and reused on every later
+        de-correlation pass. A ``None`` value is a degenerate (zero-variance)
+        residual and is cached as such.
+        """
+        if entry.name not in self._residual_units:
+            model = Model.load(entry.file_path, self.ctx)
+            assert model.oof is not None, "leaderboard model is missing its OOF predictions"
+            self._residual_units[entry.name] = standardize(self._oof_residual(model.oof))
+        return self._residual_units[entry.name]
+
+    def prune_correlated_models(self) -> int:
+        """Permanently drop models whose OOF residuals duplicate a better model's.
+
+        Walks every leaderboard entry best-score first and removes -- deleting its
+        pickle from disk -- any model whose residual ``y - y_oof`` is confidently
+        correlated (by the data-size-aware bound in
+        :mod:`kaggle_pipeline.search.decorrelation`) with a higher-scoring
+        survivor. Run after every batch (see :meth:`step`) so a dominant,
+        self-similar model class can't fill the board -- and later the ensemble --
+        with near-copies of itself that the stack can't improve on. Returns the
+        number of models pruned.
+        """
+        if not self.ctx.config.prune_correlated_models:
+            return 0
+        # Pruning is global: a redundant model goes no matter which class holds it.
+        entries = [(entry, cl) for cl in self.board.classes.values() for entry in cl.entries]
+        if len(entries) < 2:
+            return 0
+        entries.sort(key=lambda ec: -ec[0].score)
+
+        # Cached unit residuals (each model loaded at most once). The pairwise
+        # comparison is O(n_models^2 * n_rows) dot products per pass; cheap next to
+        # the per-batch CV fitting, and the board is already de-correlated from
+        # prior batches so each pass only has to absorb the new arrivals.
+        units = [self._residual_unit(entry) for entry, _cl in entries]
+        # n_eff is the number of training rows: the confidence bound on each
+        # residual correlation widens (so we prune less) as the dataset shrinks.
+        drop = select_redundant(
+            units, n_eff=len(self.y), tau=self.ctx.config.correlation_tau
+        )
+        for i in sorted(drop, reverse=True):
+            entry, cl = entries[i]
+            cl.entries.remove(entry)
+            entry.delete_file()
+
+        # Drop cache entries for models no longer on the board (pruned here or
+        # evicted by the normal capacity logic) so the cache stays bounded by the
+        # board size rather than growing with every model ever tried.
+        live = {entry.name for cl in self.board.classes.values() for entry in cl.entries}
+        self._residual_units = {k: v for k, v in self._residual_units.items() if k in live}
+
+        if drop:
+            logger.info(
+                "De-correlation: pruned %d redundant model(s) "
+                "(OOF-residual correlation lower-bound > %.3f); %d remain.",
+                len(drop),
+                self.ctx.config.correlation_tau,
+                len(self.board),
+            )
+        return len(drop)
 
     def construct_df(self, ensemble_length: int | None = None, min_repr: int | None = None):
         """Build the meta-feature frames: OOF preds (train) and test preds."""

@@ -231,6 +231,32 @@ applied while packaging:
   leave it unset for a deliberate, announced dtype-based inference — replacing
   the notebook's implicit, silent (and buggy) dtype sniffing.
 
+## Possible improvements
+
+A running checklist of enhancements worth exploring — contributions welcome:
+
+- [ ] **Check correlations during `add`, not just per batch.** De-correlation
+  currently runs as a whole-board pass after each batch
+  ([`search/decorrelation.py`](src/kaggle_pipeline/search/decorrelation.py)),
+  which re-compares every pair even though the board is already de-correlated.
+  Folding the residual-correlation check into `LeaderBoard.add` — rejecting a
+  newcomer that duplicates a better kept model *before* it is admitted — would be
+  cheaper (only newcomers vs. the kept set) and would stop a redundant model from
+  evicting a diverse one to make room.
+- [ ] **Nested cross-validation for less optimistic evaluation.** The same CV
+  folds drive hyperparameter sampling, leaderboard scoring and the ensemble
+  meta-model, so reported scores are mildly optimistic. An outer CV loop around
+  the search would give a cleaner estimate of generalization.
+- [ ] **A feature-engineering leaderboard.** Mirror the model leaderboard for
+  *features*: track which engineered features (`feature_expressions`, encodings,
+  interactions) actually help, and feed the winners back in so later search
+  rounds build more diverse, complementary models instead of re-discovering the
+  same signal.
+- [ ] **Search on a subsample, refit winners on full data.** Run the model search
+  on a smaller sample of the training set to evaluate many more candidates per
+  unit time, then refit only the leaderboard survivors on the full dataset before
+  ensembling.
+
 ## Development
 
 ```bash
