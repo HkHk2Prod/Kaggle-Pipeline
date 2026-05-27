@@ -14,6 +14,7 @@ silently leaking.
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -90,15 +91,34 @@ class FeatureMaterializer:
         self.registry = registry
         self.transforms = transformations
         self._cache: dict[tuple[str, str], np.ndarray] = {}
+        # Re-entrant (materialize recurses through parents) lock so worker threads
+        # can safely read/fill the cache concurrently. Pre-materialising a batch's
+        # features on the main thread means workers normally only hit cache reads.
+        self._lock = threading.RLock()
+
+    def __getstate__(self) -> dict[str, Any]:
+        # The RLock and the (large, recomputable) cache are not persisted.
+        state = self.__dict__.copy()
+        state["_cache"] = {}
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._cache = {}
+        self._lock = threading.RLock()
 
     def clear_cache(self) -> None:
-        self._cache.clear()
+        with self._lock:
+            self._cache.clear()
 
     def materialize(self, feature_id: str, context: MaterializationContext) -> np.ndarray:
         """Return the 1-D value array for ``feature_id`` in ``context``."""
         key = (feature_id, context.context_id)
-        if key in self._cache:
-            return self._cache[key]
+        with self._lock:
+            cached = self._cache.get(key)
+        if cached is not None:
+            return cached
 
         genome = self.registry.get_feature(feature_id)
         if genome.uses_target:
@@ -116,9 +136,12 @@ class FeatureMaterializer:
         else:
             transform = self.transforms.get(recipe.transform_name)
             parent_values = [self.materialize(pid, context) for pid in recipe.parent_feature_ids]
-            values = transform.apply(parent_values, recipe.parameters)
+            # Re-materialising an accepted feature: sanitise but never reject (a
+            # feature can legitimately be constant on a given slice, e.g. test).
+            values = transform.apply(parent_values, recipe.parameters, validate=False)
 
-        self._cache[key] = values
+        with self._lock:
+            self._cache[key] = values
         return values
 
     def describe(

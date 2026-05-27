@@ -84,15 +84,26 @@ class FeatureTransformation(ABC):
                     f"{self.name} accepts {self.input_types}, got {p.output_type} ({p.human_name}).",
                 )
 
-    def validate_output(self, values: np.ndarray) -> np.ndarray:
-        """Sanitise and validate the computed values; raise on degenerate output."""
+    def sanitize(self, values: np.ndarray) -> np.ndarray:
+        """Coerce dtype and replace Inf with NaN, without rejecting anything.
+
+        Always safe to apply -- this is what re-materialising an *accepted* feature
+        in any context (train/test/fold) uses, where the feature may legitimately
+        be (near-)constant on a slice.
+        """
         arr = np.asarray(values)
         if self.output_type in (NUMERIC, BOOLEAN):
             arr = arr.astype(float)
             arr[~np.isfinite(arr)] = np.nan
-            n = arr.size
-            if n == 0:
-                raise TransformError("empty", "empty output")
+            return arr
+        return np.asarray(arr, dtype=object)
+
+    def validate_output(self, values: np.ndarray) -> np.ndarray:
+        """Sanitise and validate; raise on degenerate output (used during generation)."""
+        arr = self.sanitize(values)
+        if arr.size == 0:
+            raise TransformError("empty", "empty output")
+        if self.output_type in (NUMERIC, BOOLEAN):
             nan_frac = float(np.isnan(arr).mean())
             if nan_frac > self.max_nan_fraction:
                 raise TransformError("too_many_nan", f"{nan_frac:.0%} NaN")
@@ -100,16 +111,11 @@ class FeatureTransformation(ABC):
             if finite.size == 0 or np.unique(finite).size < 2:
                 raise TransformError("constant", "constant / near-constant output")
         else:  # categorical
-            obj = np.asarray(arr, dtype=object)
-            n = obj.size
-            if n == 0:
-                raise TransformError("empty", "empty output")
-            missing = np.array([v is None or (isinstance(v, float) and np.isnan(v)) for v in obj])
+            missing = np.array([v is None or (isinstance(v, float) and np.isnan(v)) for v in arr])
             if float(missing.mean()) > self.max_nan_fraction:
                 raise TransformError("too_many_nan", "too many missing categories")
-            if np.unique(obj[~missing]).size < 2:
+            if np.unique(arr[~missing]).size < 2:
                 raise TransformError("constant", "constant categorical output")
-            arr = obj
         return arr
 
     # --- computation --------------------------------------------------------
@@ -117,9 +123,12 @@ class FeatureTransformation(ABC):
     def _compute(self, inputs: list[np.ndarray], params: dict[str, Any]) -> np.ndarray:
         """Return raw output values from parent value arrays (no sanitisation)."""
 
-    def apply(self, inputs: list[np.ndarray], params: dict[str, Any]) -> np.ndarray:
-        """Compute and validate output values for the given parent value arrays."""
-        return self.validate_output(self._compute(inputs, params))
+    def apply(
+        self, inputs: list[np.ndarray], params: dict[str, Any], *, validate: bool = True
+    ) -> np.ndarray:
+        """Compute output values; validate (generation) or merely sanitise (materialize)."""
+        raw = self._compute(inputs, params)
+        return self.validate_output(raw) if validate else self.sanitize(raw)
 
     # --- recipe & name ------------------------------------------------------
     def generate_recipe(
@@ -258,11 +267,6 @@ class MissingIndicator(FeatureTransformation):
     def _compute(self, inputs, params):
         x = np.asarray(inputs[0], dtype=float)
         return (~np.isfinite(x)).astype(float)
-
-    def validate_output(self, values):
-        # A missing-indicator is allowed to be all-zero only if the parent had no
-        # missing values; in that case it is useless, so reject as constant.
-        return super().validate_output(values)
 
 
 # --- numeric binary ---------------------------------------------------------

@@ -13,8 +13,9 @@ model and promotion controllers and the credit assigner each own their concern.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -32,6 +33,7 @@ from kaggle_pipeline.evolution.evaluation.oof_store import OOFStore
 from kaggle_pipeline.evolution.evaluation.validation import make_cv_splits
 from kaggle_pipeline.evolution.features.materialization import (
     FEATURE_EVAL_SAMPLE,
+    GLOBAL_TRAIN,
     MaterializationContext,
 )
 from kaggle_pipeline.evolution.features.registry import FeatureRegistry
@@ -136,7 +138,17 @@ class EvolutionController:
         n_models: int = 8,
         task: str | None = None,
         promote: bool = True,
+        executor: Any | None = None,
+        should_continue: Callable[[], bool] | None = None,
     ) -> BatchSummary:
+        """Run one batch: features, then produce/train/apply ``n_models`` models.
+
+        Training is parallelised across ``executor`` when given. Genomes are
+        produced and pre-materialised on the calling (main) thread; workers only
+        read the shared materializer cache and registry; results are applied back
+        on the main thread. ``should_continue`` (if given) is polled before
+        producing each model so a batch can stop launching work near a deadline.
+        """
         if self._eval_context is None or self._eval_y is None:
             raise RuntimeError("call initialize_features() before run_batch()")
         task = task or self._task
@@ -155,19 +167,36 @@ class EvolutionController:
             n_features_generated=feature_report.inserted + feature_report.replaced,
         )
 
+        # 1) Produce genomes (main thread), deduplicating by genome hash.
+        produced: list = []
+        seeds: list[int] = []
+        seen: set[str] = set()
         for _ in range(n_models):
-            step = self.model_controller.step(
-                self.rng,
-                batch=batch,
-                train_frame=train_frame,
-                scoring_ctx=scoring_ctx,
-                y=y,
-                splits=splits,
-                task=task,
-            )
-            self._tally(summary, step)
+            if should_continue is not None and not should_continue():
+                break
+            candidate = self.model_controller.produce(self.rng, batch=batch)
+            self._tally_action(summary, candidate.action)
+            ghash = candidate.genome.genome_hash
+            if self.population.has_genome_hash(ghash) or ghash in seen:
+                summary.n_skipped += 1
+                continue
+            seen.add(ghash)
+            produced.append(candidate)
+            seeds.append(int(self.rng.integers(0, 2**31 - 1)))
 
-        if promote:
+        # 2) Pre-materialise every referenced feature once (main thread) so workers
+        #    only hit cache reads.
+        self._prematerialize(produced, train_frame)
+
+        # 3) Train (parallel when an executor is supplied) and 4) apply results.
+        results = self._train_all(
+            produced, seeds, train_frame, scoring_ctx, y, splits, task, executor
+        )
+        for candidate, result in zip(produced, results, strict=True):
+            step = self.model_controller.apply_result(candidate, result)
+            self._tally_result(summary, step)
+
+        if promote and (should_continue is None or should_continue()):
             self._promote_step(
                 batch=batch,
                 train_frame=train_frame,
@@ -194,18 +223,42 @@ class EvolutionController:
         )
         return summary
 
-    def _tally(self, summary: BatchSummary, step) -> None:
-        if step.action == GENERATE:
+    def _prematerialize(self, produced: list, train_frame: pd.DataFrame) -> None:
+        context = MaterializationContext(frame=train_frame, context_id=GLOBAL_TRAIN)
+        for candidate in produced:
+            for fid in candidate.genome.feature_ids():
+                self.registry.materialize(fid, context)
+
+    def _train_all(self, produced, seeds, train_frame, scoring_ctx, y, splits, task, executor):
+        def train_one(candidate, seed):
+            return self.trainer.train(
+                candidate.genome,
+                train_frame=train_frame,
+                y=y,
+                splits=splits,
+                ctx=scoring_ctx,
+                task=task,
+                seed=seed,
+            )
+
+        if executor is None:
+            return [train_one(c, s) for c, s in zip(produced, seeds, strict=True)]
+        futures = [executor.submit(train_one, c, s) for c, s in zip(produced, seeds, strict=True)]
+        return [f.result() for f in futures]
+
+    def _tally_action(self, summary: BatchSummary, action: str) -> None:
+        if action == GENERATE:
             summary.n_generated += 1
-        elif step.action == MUTATE:
+        elif action == MUTATE:
             summary.n_mutated += 1
-        if step.skipped:
-            summary.n_skipped += 1
-        elif step.result is not None:
-            if step.result.status == ModelStatus.COMPLETED:
-                summary.n_completed += 1
-            elif step.result.status == ModelStatus.FAILED:
-                summary.n_failed += 1
+
+    def _tally_result(self, summary: BatchSummary, step) -> None:
+        if step.result is None:
+            return
+        if step.result.status == ModelStatus.COMPLETED:
+            summary.n_completed += 1
+        elif step.result.status == ModelStatus.FAILED:
+            summary.n_failed += 1
 
     def _promote_step(
         self, *, batch, train_frame, scoring_ctx, y, splits, task, summary: BatchSummary
@@ -216,7 +269,6 @@ class EvolutionController:
             promoted = self.promotion.promote(genome, batch=batch)
             if self.population.has_genome_hash(promoted.genome_hash):
                 continue
-            self.credit.assign_selection(promoted)
             result = self.trainer.train(
                 promoted,
                 train_frame=train_frame,
@@ -226,11 +278,14 @@ class EvolutionController:
                 task=task,
                 seed=int(self.rng.integers(0, 2**31 - 1)),
             )
+            promoted.status = result.status
+            promoted.score_set = result.score_set
+            self.credit.assign_selection(promoted)
             self.population.register(promoted)
             self.oof_store.store(promoted.model_id, result.oof)
             self.population.record_result(promoted)
             if result.status == ModelStatus.COMPLETED:
-                promoted.status = ModelStatus.PROMOTED
+                promoted.metadata["promoted"] = True
                 self.credit.assign_usage_credit(
                     promoted, is_elite=promoted.model_id in self.population.elite
                 )

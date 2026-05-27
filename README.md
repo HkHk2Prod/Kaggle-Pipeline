@@ -432,6 +432,85 @@ scorers, transformations and model factories:
 Each class has one main reason to change; prefer small explicit classes over
 clever abstractions.
 
+### KagglePipeline orchestration
+
+`KagglePipeline` (in
+[`kaggle_pipeline/evolution/pipeline.py`](src/kaggle_pipeline/evolution/pipeline.py))
+is the main orchestration class. It owns the ecosystem state, feature registry,
+model population, runtime manager, thread pools, the batch loop, checkpointing
+and optional ensemble finalization. The pipeline runs in **batches**: each batch
+may generate and score new features, create new model genomes, mutate existing
+models into **child** models, train models in parallel, update scores and
+mutation credit, print the ecosystem state, and save a checkpoint.
+
+```python
+from kaggle_pipeline.evolution import KagglePipeline
+
+pipeline = KagglePipeline(
+    max_runtime_hours=12,
+    verbosity=3,
+    enable_ensembling=True,
+    num_workers=4,
+    state_dir="state/my_competition",
+    seed=0,
+)
+pipeline.fit(train_df, target="y", test_df=test_df)   # prepares + runs the loop
+pipeline.make_submission("submission.csv")            # ensemble -> CSV
+```
+
+The pipeline is designed for long Kaggle-style runs. By default it respects a
+**12-hour runtime limit** (measured with `time.monotonic`, not wall-clock). It
+stops launching new training work before the deadline, saves the current
+ecosystem state, and, if ensembling is enabled, reserves time to build an
+ensemble from the best available models. If there is not enough time or not
+enough candidate models for an ensemble, the pipeline falls back to the best
+single model. It stops itself — it does not rely on an external timeout.
+
+`KagglePipeline` is an *orchestrator*: the algorithms live in the small
+collaborators (`FeatureRegistry`, `FeatureGenerator`, `ModelFactory`,
+`ModelMutator`, `ModelTrainer`, `CreditAssigner`, `EvolutionController`,
+`EnsembleManager`, `EcosystemSerializer`). Its public surface is `fit`, `run`,
+`run_batch`, `ensemble`, `predict`, `make_submission`, `save_state`,
+`load_state`, `checkpoint`, `print_state`, `summarize_state`, `shutdown`.
+
+**Threading.** The main thread owns and mutates the ecosystem state; worker
+threads run *pure* tasks (model training reads the registry/feature cache but
+never mutates shared state) and return immutable result objects that the main
+thread applies. A batch produces all genomes and pre-materialises their features
+on the main thread, then trains in parallel, then applies results and assigns
+credit on the main thread — so there are no races. Models train with `n_jobs=1`
+while several run in parallel, avoiding CPU oversubscription.
+
+**Checkpointing.** State is saved after every batch, before and after ensembling,
+and on graceful interruption. Each checkpoint is an atomically-written directory
+under `state_dir/checkpoints/` holding a pickled `EcosystemState` (registry,
+population, OOF store, RNG state) plus JSON sidecars (`manifest.json`,
+`config.json`, `summary.json`); a `latest.json` pointer tracks the most recent and
+old checkpoints are pruned to `keep_last_n_checkpoints`. Checkpoints are taken at
+**batch boundaries**, so the saved state only ever reflects results already
+applied — there are no half-applied partial results, and no live thread pools or
+futures are serialized. `load_state` restores the registries and RNG and rebuilds
+the collaborators (the model-family callables are reconstructed from settings, not
+unpickled).
+
+**Verbosity** (0–4) controls how much the pipeline logs and prints, via the
+standard `logging` module (thread-safe; no raw `print`):
+
+| Level | Name | Prints |
+| --- | --- | --- |
+| 0 | SILENT | nothing routine (only critical errors) |
+| 1 | SUMMARY | one-line batch summary (best score, counts, elapsed/remaining) |
+| 2 | NORMAL | batch start/end, feature/model counts, checkpoints, best-model changes |
+| 3 | DETAILED | top features, family stats, mutation success rates, runtime reserve |
+| 4 | DEBUG | mutation types, gene-level detail, internal counters |
+
+`print_state(detail_level=None)` prints the current ecosystem state at the given
+level (defaulting to the configured verbosity); `summarize_state()` returns the
+same information as a structured dict for logging or saving.
+
+As everywhere in this design, **the parent model is never changed in place** —
+mutation always creates a child model.
+
 ## Project layout
 
 ```

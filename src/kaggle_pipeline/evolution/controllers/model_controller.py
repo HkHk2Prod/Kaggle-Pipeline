@@ -34,6 +34,16 @@ MUTATE = "mutate"
 
 
 @dataclass
+class ProducedModel:
+    """A genome produced (generated or mutated) but not yet trained."""
+
+    action: str
+    genome: ModelGenome
+    parent: ModelGenome | None = None
+    record: MutationRecord | None = None
+
+
+@dataclass
 class StepResult:
     """Outcome of one model step."""
 
@@ -77,6 +87,39 @@ class ModelController:
         )
         return GENERATE if rng.random() < p_generate else MUTATE
 
+    def produce(self, rng: np.random.Generator, *, batch: int) -> ProducedModel:
+        """Generate or mutate one genome (no training). Runs on the main thread."""
+        rng = spawn_rng(rng)
+        action = self.choose_action(rng)
+        parent: ModelGenome | None = None
+        record: MutationRecord | None = None
+        if action == MUTATE:
+            parent = self.population.select_parent(rng)
+            if parent is None:
+                action = GENERATE
+        if action == MUTATE and parent is not None:
+            genome, record = self.mutator.mutate(parent, rng, batch=batch)
+        else:
+            action = GENERATE
+            genome = self.factory.generate(rng, batch=batch)
+        return ProducedModel(action, genome, parent, record)
+
+    def apply_result(self, produced: ProducedModel, result: ModelResult) -> StepResult:
+        """Apply a (worker-computed) result to the genome and registries (main thread)."""
+        genome = produced.genome
+        genome.status = result.status
+        genome.score_set = result.score_set
+        self.credit.assign_selection(genome)
+        self.population.register(genome)
+        if self.oof_store is not None:
+            self.oof_store.store(genome.model_id, result.oof)
+        self.population.record_result(genome)
+        if result.status == ModelStatus.COMPLETED:
+            self._assign_credit(genome, produced.parent, produced.record)
+        if produced.record is not None:
+            self.population.add_mutation_record(produced.record)
+        return StepResult(produced.action, genome, result, produced.record)
+
     def step(
         self,
         rng: np.random.Generator,
@@ -88,29 +131,16 @@ class ModelController:
         splits: list[tuple[np.ndarray, np.ndarray]],
         task: str = "classification",
     ) -> StepResult:
+        """Sequential produce -> train -> apply (used when no executor is supplied)."""
         rng = spawn_rng(rng)
         seed = int(rng.integers(0, 2**31 - 1))
-        action = self.choose_action(rng)
-
-        parent: ModelGenome | None = None
-        record: MutationRecord | None = None
-        if action == MUTATE:
-            parent = self.population.select_parent(rng)
-            if parent is None:
-                action = GENERATE
-
-        if action == MUTATE and parent is not None:
-            genome, record = self.mutator.mutate(parent, rng, batch=batch)
-        else:
-            action = GENERATE
-            genome = self.factory.generate(rng, batch=batch)
-
-        if self.population.has_genome_hash(genome.genome_hash):
-            return StepResult(action, genome, skipped=True, record=record)
-
-        self.credit.assign_selection(genome)
+        produced = self.produce(rng, batch=batch)
+        if self.population.has_genome_hash(produced.genome.genome_hash):
+            return StepResult(
+                produced.action, produced.genome, skipped=True, record=produced.record
+            )
         result = self.trainer.train(
-            genome,
+            produced.genome,
             train_frame=train_frame,
             y=y,
             splits=splits,
@@ -118,16 +148,7 @@ class ModelController:
             task=task,
             seed=seed,
         )
-        self.population.register(genome)
-        if self.oof_store is not None:
-            self.oof_store.store(genome.model_id, result.oof)
-        self.population.record_result(genome)
-
-        if result.status == ModelStatus.COMPLETED:
-            self._assign_credit(genome, parent, record)
-        if record is not None:
-            self.population.add_mutation_record(record)
-        return StepResult(action, genome, result, record)
+        return self.apply_result(produced, result)
 
     def _assign_credit(
         self,

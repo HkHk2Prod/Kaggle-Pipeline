@@ -132,8 +132,12 @@ class ModelTrainer:
         task: str = "classification",
         seed: int | None = None,
     ) -> ModelResult:
-        """Train + cross-validate ``genome``; return a :class:`ModelResult`."""
-        genome.status = ModelStatus.TRAINING
+        """Train + cross-validate ``genome``; return a :class:`ModelResult`.
+
+        Pure with respect to ``genome``: it reads the genome but never mutates it,
+        so it is safe to run in a worker thread. The caller (main thread) applies
+        the result to the genome and registries.
+        """
         t0 = perf_counter()
         try:
             X = self._build_feature_frame(genome, train_frame)
@@ -152,8 +156,6 @@ class ModelTrainer:
                 n_features=len(genome.feature_reference_genes),
                 fidelity_level=genome.fidelity_level,
             )
-            genome.score_set = score_set
-            genome.status = ModelStatus.COMPLETED
             return ModelResult(genome.model_id, ModelStatus.COMPLETED, score_set, oof)
         except MemoryError:
             return self._fail(genome, FailureReason.MEMORY_ERROR, "MemoryError")
@@ -162,18 +164,42 @@ class ModelTrainer:
             return self._fail(genome, FailureReason.TRAINING_EXCEPTION, str(exc))
 
     def _fail(self, genome: ModelGenome, reason: str, message: str) -> ModelResult:
-        genome.status = ModelStatus.FAILED
         return ModelResult(
             genome.model_id, ModelStatus.FAILED, failure_reason=reason, error_message=message
         )
 
+    def fit_predict_test(
+        self,
+        genome: ModelGenome,
+        *,
+        train_frame: pd.DataFrame,
+        y: np.ndarray,
+        test_frame: pd.DataFrame,
+        task: str = "classification",
+        seed: int | None = None,
+    ) -> np.ndarray:
+        """Refit ``genome`` on the full train set and predict ``test_frame``.
+
+        Used at finalization to turn ensemble members into test predictions
+        (training only stores cross-validated OOF, not test predictions).
+        """
+        X_train = self._build_feature_frame(genome, train_frame)
+        X_test = self._build_feature_frame(genome, test_frame, context_id="global_test")
+        pipeline = self._build_pipeline(genome, X_train, seed=seed)
+        pipeline.fit(X_train, y)
+        if task == "classification":
+            return pipeline.predict_proba(X_test)
+        return pipeline.predict(X_test)
+
     # --- feature frame ------------------------------------------------------
-    def _build_feature_frame(self, genome: ModelGenome, train_frame: pd.DataFrame) -> pd.DataFrame:
-        context = MaterializationContext(frame=train_frame, context_id=self.context_id)
+    def _build_feature_frame(
+        self, genome: ModelGenome, frame: pd.DataFrame, *, context_id: str | None = None
+    ) -> pd.DataFrame:
+        context = MaterializationContext(frame=frame, context_id=context_id or self.context_id)
         data: dict[str, np.ndarray] = {}
         for fr in genome.feature_reference_genes:
             data[fr.feature_id] = self.registry.materialize(fr.feature_id, context)
-        return pd.DataFrame(data, index=train_frame.index)
+        return pd.DataFrame(data, index=frame.index)
 
     # --- pipeline -----------------------------------------------------------
     def _build_pipeline(self, genome: ModelGenome, X: pd.DataFrame, *, seed: int | None) -> Any:

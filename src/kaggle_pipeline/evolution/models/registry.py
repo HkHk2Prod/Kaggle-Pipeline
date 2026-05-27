@@ -166,3 +166,9 @@ class ModelPopulation:
 
     def elite_genomes(self) -> list[ModelGenome]:
         return [self._by_id[mid] for mid in self.elite]
+
+    def all_genomes(self) -> list[ModelGenome]:
+        return list(self._by_id.values())
+
+    def status_counts(self) -> dict[str, int]:
+        return dict(Counter(g.status for g in self._by_id.values()))
