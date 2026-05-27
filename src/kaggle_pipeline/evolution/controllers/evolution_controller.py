@@ -87,10 +87,17 @@ class EvolutionController:
         self.registry = registry or FeatureRegistry(self.settings)
         self.population = population or ModelPopulation(self.settings)
         self.oof_store = OOFStore()
+        # Let the population evict a pruned model's OOF (its only "big" data) while
+        # keeping the lightweight genome + scores.
+        self.population.oof_store = self.oof_store
         self.credit = CreditAssigner(self.registry, self.settings, oof_store=self.oof_store)
         self.factory = ModelFactory(self.registry, self.settings, families=self.families)
         self.mutator = ModelMutator(self.registry, self.settings, families=self.families)
-        self.trainer = ModelTrainer(self.registry, families=self.families)
+        self.trainer = ModelTrainer(
+            self.registry,
+            families=self.families,
+            onehot_max_cardinality=self.settings.onehot_max_cardinality,
+        )
         self.feature_controller = FeatureController(self.registry, self.settings)
         self.model_controller = ModelController(
             self.population,

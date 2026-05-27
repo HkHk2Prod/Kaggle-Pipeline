@@ -32,7 +32,8 @@ class KagglePipelineSettings:
     finalization_time_reserve_seconds: float = 5 * 60
 
     # --- verbosity ----------------------------------------------------------
-    verbosity: int = 2
+    # Default 3 (DETAILED) mirrors the v1 Config's default ``verbosity="verbose"``.
+    verbosity: int = 3
 
     # --- state saving -------------------------------------------------------
     state_dir: str = "kagglepipeline_state"
@@ -43,22 +44,35 @@ class KagglePipelineSettings:
     atomic_checkpoints: bool = True
 
     # --- parallelism --------------------------------------------------------
-    num_workers: int | None = None  # auto-detect when None
+    # ``None`` auto-detects all cores -- the same intent as the v1 Config's
+    # ``n_workers = -1``.
+    num_workers: int | None = None
     feature_workers: int | None = None
     model_workers: int | None = None
     thread_backend: str = "threadpool"
     avoid_nested_parallelism: bool = True
 
     # --- batch training -----------------------------------------------------
-    models_per_batch: int = 8
+    # Defaults that have a v1 ``Config`` counterpart match it so a run behaves like
+    # the previous pipeline: models_per_batch <- step_batch_size (32),
+    # ensemble_max_models <- ensemble_length (30), cv_splits <- cv_splits (5).
+    models_per_batch: int = 32
     feature_candidates_per_batch: int | None = None
     feature_generation_ratio: float = 0.10
     max_active_features: int = 300
     cv_splits: int = 5
+    # Cardinality cap above which a categorical is frequency-encoded rather than
+    # one-hot (keeps materialized width bounded). Matches v1 onehot_max_cardinality.
+    onehot_max_cardinality: int = 20
+    # Fraction of the training rows (randomly, stratified, sampled) that models are
+    # trained/cross-validated on during the search, to evaluate many more candidates
+    # per unit time. Ensemble winners are refit on the FULL data at finalization.
+    # 1.0 disables subsampling. Default 0.10 (10%).
+    search_sample_fraction: float = 0.10
 
     # --- ensembling ---------------------------------------------------------
     enable_ensembling: bool = True
-    ensemble_max_models: int = 50
+    ensemble_max_models: int = 30
     ensemble_min_models: int = 2
     ensemble_strategy: str = "greedy"
     reserve_time_for_ensemble: bool = True
@@ -80,6 +94,10 @@ class KagglePipelineSettings:
             raise ValueError("max_runtime_seconds must be positive")
         if self.verbosity not in (0, 1, 2, 3, 4):
             raise ValueError(f"verbosity must be 0..4, got {self.verbosity}")
+        if not 0.0 < self.search_sample_fraction <= 1.0:
+            raise ValueError(
+                f"search_sample_fraction must be in (0, 1], got {self.search_sample_fraction}"
+            )
 
     # --- derived ------------------------------------------------------------
     def evolution_settings(self) -> EvolutionSettings:
@@ -92,6 +110,7 @@ class KagglePipelineSettings:
             preferred_num_mutated_genes_distribution=dict(
                 self.preferred_num_mutated_genes_distribution
             ),
+            onehot_max_cardinality=self.onehot_max_cardinality,
             default_random_seed=self.seed,
         )
 

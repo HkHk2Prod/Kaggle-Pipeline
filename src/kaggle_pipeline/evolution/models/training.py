@@ -116,10 +116,12 @@ class ModelTrainer:
         *,
         families: dict[str, FamilyDefinition] | None = None,
         context_id: str = GLOBAL_TRAIN,
+        onehot_max_cardinality: int = 20,
     ):
         self.registry = registry
         self.families = families or build_default_families()
         self.context_id = context_id
+        self.onehot_max_cardinality = onehot_max_cardinality
 
     def train(
         self,
@@ -183,8 +185,10 @@ class ModelTrainer:
         Used at finalization to turn ensemble members into test predictions
         (training only stores cross-validated OOF, not test predictions).
         """
-        X_train = self._build_feature_frame(genome, train_frame)
-        X_test = self._build_feature_frame(genome, test_frame, context_id="global_test")
+        # Distinct context ids from the search so the full-data refit never reuses
+        # cached subsample arrays of a different length.
+        X_train = self._build_feature_frame(genome, train_frame, context_id="final_train")
+        X_test = self._build_feature_frame(genome, test_frame, context_id="final_test")
         pipeline = self._build_pipeline(genome, X_train, seed=seed)
         pipeline.fit(X_train, y)
         if task == "classification":
@@ -222,6 +226,13 @@ class ModelTrainer:
             feature = self.registry.get_feature(fr.feature_id)
             if feature.output_type == CATEGORICAL:
                 encoding = fr.encoding.value if fr.encoding is not None else FREQUENCY
+                # Never one-hot a high-cardinality column -- it would explode the
+                # materialized width; fall back to frequency (one column) instead.
+                if (
+                    encoding == ONEHOT
+                    and X[fr.feature_id].nunique(dropna=True) > self.onehot_max_cardinality
+                ):
+                    encoding = FREQUENCY
                 transformers.append(
                     (f"enc_{fr.feature_id}", self._encoder_for(encoding), [fr.feature_id])
                 )

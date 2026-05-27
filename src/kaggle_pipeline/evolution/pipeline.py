@@ -101,7 +101,9 @@ class KagglePipeline:
         self.ensemble_result: EnsembleResult | None = None
 
         # Data / problem state, set in fit().
-        self._train_features: pd.DataFrame | None = None
+        self._train_features: pd.DataFrame | None = None  # full training features
+        self._search_features: pd.DataFrame | None = None  # subsample used during search
+        self._search_y: np.ndarray | None = None
         self._test_features: pd.DataFrame | None = None
         self._test_ids: Any = None
         self._y: np.ndarray | None = None
@@ -129,16 +131,23 @@ class KagglePipeline:
     def fit(
         self,
         train_df: pd.DataFrame,
-        target: str,
+        target: str | None = None,
         test_df: pd.DataFrame | None = None,
         *,
-        task: str = "classification",
-        scoring: str = "roc_auc",
+        task: str | None = None,
+        scoring: str | None = None,
         id_col: str = "id",
+        feature_expressions: list[str] | None = None,
         feature_types: dict[str, str] | None = None,
         resume: bool = False,
     ) -> KagglePipeline:
-        """Prepare data + ecosystem, then run the full pipeline (returns self)."""
+        """Prepare data + ecosystem, then run the full pipeline (returns self).
+
+        ``target``/``task``/``scoring`` left as ``None`` are autodetected from the
+        data using the v1 resolver (same rules as ``kaggle_pipeline.run``).
+        ``feature_expressions`` are ``df.eval`` strings that add engineered columns
+        (no v1 categorical *encodings* are applied -- encoding is model-specific).
+        """
         self._prepare(
             train_df,
             target,
@@ -146,6 +155,7 @@ class KagglePipeline:
             task=task,
             scoring=scoring,
             id_col=id_col,
+            feature_expressions=feature_expressions,
             feature_types=feature_types,
             resume=resume,
         )
@@ -153,16 +163,33 @@ class KagglePipeline:
         return self
 
     def _prepare(
-        self, train_df, target, test_df, *, task, scoring, id_col, feature_types, resume
+        self,
+        train_df,
+        target,
+        test_df,
+        *,
+        task,
+        scoring,
+        id_col,
+        feature_expressions,
+        feature_types,
+        resume,
     ) -> None:
-        self._task = task
         self._id_col = id_col
-        drop = [c for c in (target, id_col) if c in train_df.columns]
-        self._train_features = train_df.drop(columns=drop)
+        # 1) Autodetect target/task/scoring on the RAW frame (before engineering, so
+        #    the "last non-id column" target heuristic is not fooled by new columns).
+        target, task, scoring = self._autodetect(train_df, target, task, scoring, id_col)
+        self._task = task
+
+        # 2) Feature engineering: df.eval expressions add columns; no encodings.
+        train_eng = self._engineer(train_df, feature_expressions)
+        drop = [c for c in (target, id_col) if c in train_eng.columns]
+        self._train_features = train_eng.drop(columns=drop)
         feature_cols = list(self._train_features.columns)
 
-        y_raw = train_df[target].to_numpy()
-        if task == "classification":
+        y_raw = train_eng[target].to_numpy()
+        classification = task == "classification"
+        if classification:
             self._classes, y = np.unique(y_raw, return_inverse=True)
             target_width = int(self._classes.size)
         else:
@@ -172,17 +199,25 @@ class KagglePipeline:
         self._scoring_ctx = _ScoringContext(
             scoring_fn=resolve_scoring(scoring),
             target_width=target_width,
-            target_is_num=(task != "classification"),
+            target_is_num=not classification,
         )
 
         if test_df is not None:
+            test_eng = self._engineer(test_df, feature_expressions)
             self._test_ids = (
-                test_df[id_col].to_numpy() if id_col in test_df.columns else np.arange(len(test_df))
+                test_eng[id_col].to_numpy()
+                if id_col in test_eng.columns
+                else np.arange(len(test_eng))
             )
-            self._test_features = test_df.drop(columns=[id_col], errors="ignore")
+            self._test_features = test_eng.drop(columns=[id_col], errors="ignore")
+
+        # 3) Search subsample: train/score on a random fraction during the search;
+        #    ensemble winners are refit on the full data at finalization.
+        self._search_features, self._search_y = self._build_search_sample(
+            self._train_features, self._y, task
+        )
 
         originals = [(c, self._infer_type(c, feature_types)) for c in feature_cols]
-
         evo_settings = self.settings.evolution_settings()
         self.controller = EvolutionController(
             evo_settings,
@@ -191,15 +226,65 @@ class KagglePipeline:
             seed=self.settings.seed,
         )
         self.controller.initialize_features(
-            originals, eval_frame=self._train_features, y=self._y, task=task
+            originals, eval_frame=self._search_features, y=self._search_y, task=task
         )
         if resume:
             self._resume_latest()
         self.log(
-            f"prepared: {len(feature_cols)} original features, {target_width}-class target, "
-            f"{len(train_df)} rows",
+            f"prepared: target={target!r} task={task} scoring={scoring} | "
+            f"{len(feature_cols)} features, {target_width}-class, "
+            f"{len(train_df)} rows (search on {len(self._search_y)})",
             level=Verbosity.NORMAL,
         )
+
+    def _autodetect(self, train_df, target, task, scoring, id_col):
+        """Fill target/task/scoring left as None, reusing the v1 autodetect rules."""
+        if target is not None and task is not None and scoring is not None:
+            return target, task, scoring
+        from kaggle_pipeline.config import Config
+        from kaggle_pipeline.data.autodetect import resolve_problem_definition
+
+        cfg = Config(
+            target=[target] if target else None, id_col=[id_col], task=task, scoring=scoring
+        )
+        resolve_problem_definition(cfg, train_df)
+        return cfg.target[0], cfg.task, cfg.scoring
+
+    def _engineer(self, df: pd.DataFrame, feature_expressions: list[str] | None) -> pd.DataFrame:
+        """Apply ``df.eval`` feature expressions (no encodings)."""
+        if not feature_expressions:
+            return df
+        from kaggle_pipeline.preprocessing.transformers import FeatureEngineer
+
+        return FeatureEngineer(expressions=feature_expressions).fit_transform(df.copy())
+
+    def _build_search_sample(self, features: pd.DataFrame, y: np.ndarray, task: str):
+        """Return a (stratified) random subsample for the search, or the full data."""
+        frac = self.settings.search_sample_fraction
+        n = len(features)
+        if not (0.0 < frac < 1.0):
+            return features, y
+        n_sample = int(round(n * frac))
+        min_rows = max(2 * self.settings.cv_splits, 30)
+        if n_sample < min_rows or n_sample >= n:
+            self.log(
+                f"search subsample skipped (n={n}, frac={frac}); using full data",
+                level=Verbosity.NORMAL,
+            )
+            return features, y
+        from sklearn.model_selection import train_test_split
+
+        stratify = y if task == "classification" else None
+        seed = self.settings.seed
+        try:
+            idx, _ = train_test_split(
+                np.arange(n), train_size=n_sample, random_state=seed, stratify=stratify
+            )
+        except ValueError:  # a class too rare to stratify -- sample without it
+            idx, _ = train_test_split(np.arange(n), train_size=n_sample, random_state=seed)
+        idx = np.sort(idx)
+        sampled = features.iloc[idx].reset_index(drop=True)
+        return sampled, np.asarray(y)[idx]
 
     def _infer_type(self, column: str, feature_types: dict[str, str] | None) -> str:
         if feature_types and column in feature_types:
@@ -268,15 +353,19 @@ class KagglePipeline:
         )
 
     def _require_ready(self):
-        """Return ``(controller, scoring_ctx, y, train_features)``, asserting readiness."""
+        """Return ``(controller, scoring_ctx, search_y, search_features)``.
+
+        The search subsample is what batches train on and what OOF is scored
+        against; finalization (``predict``) uses the full data instead.
+        """
         if (
             self.controller is None
             or self._scoring_ctx is None
-            or self._y is None
-            or self._train_features is None
+            or self._search_y is None
+            or self._search_features is None
         ):
             raise RuntimeError("call fit() before running the pipeline")
-        return self.controller, self._scoring_ctx, self._y, self._train_features
+        return self.controller, self._scoring_ctx, self._search_y, self._search_features
 
     # --- finalization -------------------------------------------------------
     def _finalize(self) -> None:
@@ -312,8 +401,9 @@ class KagglePipeline:
         return self.ensemble_result
 
     def predict(self, test_df: pd.DataFrame | None = None) -> np.ndarray:
-        """Predict test data with the ensemble (refits members on full train data)."""
-        controller, _, y, train = self._require_ready()
+        """Predict test data with the ensemble (refits members on FULL train data)."""
+        controller, _, _, _ = self._require_ready()
+        assert self._train_features is not None and self._y is not None
         if self.ensemble_result is None:
             self.ensemble()
         assert self.ensemble_result is not None
@@ -329,8 +419,8 @@ class KagglePipeline:
             self.ensemble_result,
             trainer=controller.trainer,
             population=controller.population,
-            train_frame=train,
-            y=y,
+            train_frame=self._train_features,  # winners refit on the full data
+            y=self._y,
             test_frame=test,
             task=self._task,
             seed=self.settings.seed,

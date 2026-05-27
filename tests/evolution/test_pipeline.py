@@ -94,6 +94,31 @@ def test_pipeline_state_saves_and_reloads(tmp_path):
         resumed.shutdown()
 
 
+def test_autodetect_feature_expressions_and_subsample(tmp_path):
+    warnings.simplefilter("ignore")
+    rng = np.random.default_rng(1)
+    n = 500
+    train = pd.DataFrame(
+        {
+            "id": range(n),
+            "num1": rng.normal(size=n),
+            "num2": rng.normal(size=n),
+            "target": rng.integers(0, 2, size=n),
+        }
+    )
+    pipeline = _fast_pipeline(tmp_path, max_runtime_seconds=15, search_sample_fraction=0.2)
+    try:
+        # target/task/scoring all autodetected; feature_expressions add a column.
+        pipeline.fit(train, feature_expressions=["ratio = num1 - num2"], id_col="id")
+        assert pipeline._task == "classification"  # autodetected from 0/1 target
+        assert "ratio" in list(pipeline._train_features.columns)  # engineered, no encodings
+        assert len(pipeline._train_features) == n  # full data retained
+        assert len(pipeline._search_y) == round(n * 0.2)  # search on 20% subsample
+        assert pipeline.summarize_state()["models"]["completed"] > 0
+    finally:
+        pipeline.shutdown()
+
+
 def test_silent_verbosity_prints_nothing(tmp_path):
     # format_summary at level 0 yields nothing; print_state must be a no-op.
     assert (

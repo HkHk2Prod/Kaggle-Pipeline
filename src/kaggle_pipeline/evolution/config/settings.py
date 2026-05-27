@@ -65,6 +65,10 @@ class EvolutionSettings:
     # features as parents (depth 1); raise these to enable deeper composition.
     max_feature_depth: int = 1
     allow_generated_feature_parents: bool = False
+    # A categorical with more distinct levels than this is never one-hot encoded
+    # (it falls back to frequency encoding) so a single feature cannot explode into
+    # a huge materialized width. Mirrors the v1 Config's ``onehot_max_cardinality``.
+    onehot_max_cardinality: int = 20
 
     # --- Feature scoring & selection ---------------------------------------
     feature_scoring_weights: FeatureScoringWeights = field(default_factory=FeatureScoringWeights)

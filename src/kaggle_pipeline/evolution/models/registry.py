@@ -14,6 +14,7 @@ ensemble-candidate (stability-penalised score).
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 import numpy as np
 
@@ -47,6 +48,9 @@ class ModelPopulation:
         self.active: list[str] = []
         self.elite: list[str] = []
         self.mutation_records: list[MutationRecord] = []
+        # Optional store whose big OOF arrays are freed when a model is pruned;
+        # wired by the controller. The genome + scores are always kept.
+        self.oof_store: Any = None
 
     # --- registration -------------------------------------------------------
     def has_genome_hash(self, genome_hash: str) -> bool:
@@ -119,6 +123,9 @@ class ModelPopulation:
                 keep.append(mid)
             else:
                 self._by_id[mid].status = ModelStatus.PRUNED
+                # Free the pruned model's big data (OOF); keep genome + scores.
+                if self.oof_store is not None:
+                    self.oof_store.remove(mid)
         self.active = keep
 
     # --- parent selection ---------------------------------------------------
