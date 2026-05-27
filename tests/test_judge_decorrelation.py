@@ -7,6 +7,7 @@ the redundant entries *and* deletes their pickles from disk.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -54,6 +55,37 @@ def test_prune_removes_redundant_models_and_their_files(smoke_config):
     assert survivors == {e_best.name, e_diverse.name}  # kept the best + the diverse one
     assert not Path(e_dupe.file_path).exists()  # redundant model's pickle deleted
     assert Path(e_best.file_path).exists()
+
+
+def test_prune_logs_count_at_info_and_per_model_detail_at_debug(smoke_config, caplog):
+    judge = _judge(smoke_config)
+    cls_name = next(iter(judge.board.classes))
+    judge.board.classes[cls_name].upper = 10
+
+    n = len(judge.y)
+    oof = np.random.default_rng(0).uniform(0.05, 0.95, size=(n, 1))
+    best = _add_model(judge, cls_name, oof, score=0.90)
+    dupe = _add_model(judge, cls_name, oof.copy(), score=0.80)
+
+    # The package logger sets propagate=False, so caplog's root handler wouldn't
+    # see these records; attach caplog's handler to it directly.
+    pkg_logger = logging.getLogger("kaggle_pipeline")
+    caplog.set_level(logging.DEBUG, logger="kaggle_pipeline")
+    pkg_logger.addHandler(caplog.handler)
+    try:
+        judge.prune_correlated_models()
+    finally:
+        pkg_logger.removeHandler(caplog.handler)
+
+    # Normal level (INFO): a one-line eviction count.
+    info = [r.message for r in caplog.records if r.levelno == logging.INFO]
+    assert any("evicted 1 redundant model" in m for m in info)
+    # Verbose level (DEBUG): one line naming the evicted model, its score and the
+    # correlation with the model it duplicated.
+    debug = [r.message for r in caplog.records if r.levelno == logging.DEBUG]
+    detail = next(m for m in debug if dupe.name in m)
+    assert "score 0.8000" in detail
+    assert best.name in detail  # names the higher-scoring model it duplicated
 
 
 def test_prune_is_a_noop_when_disabled(smoke_config):

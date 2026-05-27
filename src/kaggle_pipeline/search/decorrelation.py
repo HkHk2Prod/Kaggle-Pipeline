@@ -85,7 +85,7 @@ def select_redundant(
     n_eff: int,
     tau: float,
     z: float = Z_ONE_SIDED_95,
-) -> set[int]:
+) -> dict[int, tuple[int, float]]:
     """Greedy, score-ordered de-correlation over standardised residuals.
 
     ``units`` are unit residual vectors (from :func:`standardize`, ``None`` for a
@@ -93,7 +93,12 @@ def select_redundant(
     down, a model is marked redundant when the lower confidence bound (see
     :func:`residual_correlation_lower_bound`) on the correlation of its residual
     with an already-kept, higher-scoring model's residual exceeds ``tau`` -- i.e.
-    we are confident the two make the same mistakes. Returns the indices to drop.
+    we are confident the two make the same mistakes.
+
+    Returns a mapping ``dropped_index -> (kept_index, correlation)``: the index of
+    the better-scoring model the dropped one duplicates, and the observed residual
+    correlation that triggered the eviction (so callers can report *why* each model
+    went).
 
     We keep the better model and drop the worse. A plausibly better strategy would
     be to *average* the redundant pair (or keep the average only when it beats the
@@ -101,19 +106,18 @@ def select_redundant(
     independent noise, so averaging them would cut variance rather than discard
     information. Left as a future improvement.
     """
-    kept_units: list[np.ndarray] = []
-    dropped: set[int] = set()
+    kept: list[tuple[int, np.ndarray]] = []  # (index into ``units``, unit residual)
+    dropped: dict[int, tuple[int, float]] = {}
     for i, unit in enumerate(units):
         if unit is None:
             continue
-        is_redundant = any(
-            residual_correlation_lower_bound(float(unit @ kept), n_eff, z) > tau
-            for kept in kept_units
-        )
-        if is_redundant:
-            dropped.add(i)
+        for kept_index, kept_unit in kept:
+            r = float(unit @ kept_unit)
+            if residual_correlation_lower_bound(r, n_eff, z) > tau:
+                dropped[i] = (kept_index, r)
+                break
         else:
-            kept_units.append(unit)
+            kept.append((i, unit))
     return dropped
 
 
@@ -124,5 +128,6 @@ def select_redundant_indices(
     tau: float,
     z: float = Z_ONE_SIDED_95,
 ) -> set[int]:
-    """Convenience wrapper of :func:`select_redundant` that standardises first."""
-    return select_redundant([standardize(r) for r in residuals], n_eff=n_eff, tau=tau, z=z)
+    """Convenience wrapper of :func:`select_redundant` returning just the dropped indices."""
+    units = [standardize(r) for r in residuals]
+    return set(select_redundant(units, n_eff=n_eff, tau=tau, z=z))

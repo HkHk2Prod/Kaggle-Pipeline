@@ -182,8 +182,10 @@ class Judge:
         units = [self._residual_unit(entry) for entry, _cl in entries]
         # n_eff is the number of training rows: the confidence bound on each
         # residual correlation widens (so we prune less) as the dataset shrinks.
+        # ``drop`` maps each evicted entry's index to (the better model it
+        # duplicates, the observed residual correlation that triggered eviction).
         drop = select_redundant(units, n_eff=len(self.y), tau=self.ctx.config.correlation_tau)
-        for i in sorted(drop, reverse=True):
+        for i in drop:
             entry, cl = entries[i]
             cl.entries.remove(entry)
             entry.delete_file()
@@ -195,13 +197,28 @@ class Judge:
         self._residual_units = {k: v for k, v in self._residual_units.items() if k in live}
 
         if drop:
+            # Normal level: just the count. Verbose level: one line per evicted
+            # model with its CV score and the residual correlation (and which
+            # higher-scoring model it duplicated) that got it evicted.
             logger.info(
-                "De-correlation: pruned %d redundant model(s) "
-                "(OOF-residual correlation lower-bound > %.3f); %d remain.",
+                "De-correlation: evicted %d redundant model(s) "
+                "(residual-correlation lower bound > %.3f); %d remain.",
                 len(drop),
                 self.ctx.config.correlation_tau,
                 len(self.board),
             )
+            for i in sorted(drop):  # entries are score-descending, so best evicted first
+                kept_index, corr = drop[i]
+                evicted = entries[i][0]
+                kept = entries[kept_index][0]
+                logger.debug(
+                    "  evicted %s (score %.4f) -- residual corr %.4f with %s (score %.4f)",
+                    evicted.name,
+                    evicted.score,
+                    corr,
+                    kept.name,
+                    kept.score,
+                )
         return len(drop)
 
     def construct_df(self, ensemble_length: int | None = None, min_repr: int | None = None):

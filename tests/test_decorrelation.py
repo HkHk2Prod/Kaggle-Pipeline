@@ -11,7 +11,9 @@ import numpy as np
 
 from kaggle_pipeline.search.decorrelation import (
     residual_correlation_lower_bound,
+    select_redundant,
     select_redundant_indices,
+    standardize,
 )
 
 
@@ -75,6 +77,21 @@ def test_only_the_redundant_member_is_dropped_in_a_mixed_set():
     independent = rng.normal(size=2000)
     drop = select_redundant_indices([a, near_copy, independent], n_eff=2000, tau=0.98)
     assert drop == {1}  # keep the best (0) and the diverse one (2)
+
+
+def test_select_redundant_reports_the_match_and_correlation():
+    # The richer return maps each dropped index to (the better model it duplicates,
+    # the observed correlation) so callers can explain why it was evicted.
+    rng = np.random.default_rng(5)
+    a = rng.normal(size=2000)
+    near_copy = a + 1e-4 * rng.normal(size=2000)
+    independent = rng.normal(size=2000)
+    units = [standardize(a), standardize(near_copy), standardize(independent)]
+    dropped = select_redundant(units, n_eff=2000, tau=0.98)
+    assert set(dropped) == {1}  # only the near-copy goes
+    kept_index, corr = dropped[1]
+    assert kept_index == 0  # duplicated the better-scoring model at index 0
+    assert corr > 0.99  # near-identical residuals
 
 
 def test_zero_variance_residual_is_kept_and_ignored():
