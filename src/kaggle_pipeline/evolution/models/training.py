@@ -66,11 +66,17 @@ class _FrequencyEncoder(BaseEstimator, TransformerMixin):
         col = np.asarray(X).ravel().astype(str)
         values, counts = np.unique(col, return_counts=True)
         self.freq_ = dict(zip(values, counts / col.size, strict=True))
+        self.feature_names_in_ = np.asarray(getattr(X, "columns", ["x0"]), dtype=object)
         return self
 
     def transform(self, X: Any) -> np.ndarray:
         col = np.asarray(X).ravel().astype(str)
         return np.array([self.freq_.get(v, 0.0) for v in col]).reshape(-1, 1)
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        if input_features is not None:
+            return np.asarray(input_features, dtype=object)
+        return self.feature_names_in_
 
 
 class _CountEncoder(BaseEstimator, TransformerMixin):
@@ -80,11 +86,17 @@ class _CountEncoder(BaseEstimator, TransformerMixin):
         col = np.asarray(X).ravel().astype(str)
         values, counts = np.unique(col, return_counts=True)
         self.count_ = dict(zip(values, counts.astype(float), strict=True))
+        self.feature_names_in_ = np.asarray(getattr(X, "columns", ["x0"]), dtype=object)
         return self
 
     def transform(self, X: Any) -> np.ndarray:
         col = np.asarray(X).ravel().astype(str)
         return np.array([self.count_.get(v, 0.0) for v in col]).reshape(-1, 1)
+
+    def get_feature_names_out(self, input_features: Any = None) -> np.ndarray:
+        if input_features is not None:
+            return np.asarray(input_features, dtype=object)
+        return self.feature_names_in_
 
 
 class _GenomeModel:
@@ -253,7 +265,13 @@ class ModelTrainer:
         if numeric_cols:
             transformers.insert(0, ("num", SimpleImputer(strategy="median"), numeric_cols))
 
-        preprocessor = ColumnTransformer(transformers, remainder="drop")
+        # set_output("pandas") so the estimator receives a DataFrame with stable
+        # column names: otherwise LightGBM autogenerates "Column_0"... feature
+        # names at fit and warns at predict ("X does not have valid feature
+        # names, but LGBMClassifier was fitted with feature names").
+        preprocessor = ColumnTransformer(transformers, remainder="drop").set_output(
+            transform="pandas"
+        )
         steps: list[tuple[str, Any]] = [("prep", preprocessor)]
         if fam.needs_scaling:
             steps.append(("scaler", StandardScaler()))
