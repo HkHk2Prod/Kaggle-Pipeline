@@ -31,7 +31,7 @@ def test_save_load_round_trip_preserves_params_and_predictions(fitted_ctx, tmp_p
     ctx = fitted_ctx
     X, y = _xy(ctx)
 
-    model = registry["LogisticRegression"](ctx, complexity=1.0)
+    model = registry["LogisticRegression"](ctx)
     model.fit(X, y)
     original_pred = model.predict(X)
 

@@ -37,9 +37,6 @@ class FakeJudge:
         self.steps_run += 1
         return value
 
-    def format_complexities(self) -> str:
-        return "Complexities of the models are {}"
-
     def predict(self) -> np.ndarray:
         return SENTINEL
 

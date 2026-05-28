@@ -16,6 +16,20 @@ if TYPE_CHECKING:
     from kaggle_pipeline.models.base import Model
 
 
+def make_cv_splitter(*, n_splits: int, seed: int | None, task: str = "classification"):
+    """Build the CV splitter shared by the v1 search and the evolutionary trainer.
+
+    Classification stratifies on the target; regression uses a plain K-fold. Both
+    shuffle with the run ``seed`` so folds are reproducible -- and identical across
+    the two layers, which is what keeps their reported scores comparable.
+    """
+    from sklearn.model_selection import KFold, StratifiedKFold
+
+    if task == "classification":
+        return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    return KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+
 class CrossValScore:
     """Fit/score ``model`` across ``splits`` and attach OOF preds to the model."""
 

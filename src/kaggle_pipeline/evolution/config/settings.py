@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from kaggle_pipeline.preprocessing.encoders import ONEHOT_MAX_CARDINALITY
+
 
 @dataclass
 class FeatureScoringWeights:
@@ -69,8 +71,8 @@ class EvolutionSettings:
     allow_generated_feature_parents: bool = True
     # A categorical with more distinct levels than this is never one-hot encoded
     # (it falls back to frequency encoding) so a single feature cannot explode into
-    # a huge materialized width. Mirrors the v1 Config's ``onehot_max_cardinality``.
-    onehot_max_cardinality: int = 20
+    # a huge materialized width. Shares the v1 default so the two stay in lockstep.
+    onehot_max_cardinality: int = ONEHOT_MAX_CARDINALITY
 
     # --- Feature scoring & selection ---------------------------------------
     feature_scoring_weights: FeatureScoringWeights = field(default_factory=FeatureScoringWeights)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scipy.stats import randint, uniform
+from scipy.stats import loguniform, randint, uniform
 from sklearn.pipeline import Pipeline
 
 from kaggle_pipeline.models.base import Model
@@ -16,21 +16,22 @@ class HistGBClassifierModel(Model):
     handles_categoricals = True
     native_cardinality_cap = 255
 
-    def generate_distribution(self, complexity):
-        k = complexity
+    def generate_distribution(self):
+        # Wide fixed ranges: a single draw can land on a fast shallow learner or
+        # a deep, lightly-regularised one. (early_stopping caps useless growth.)
         return {
             "model__early_stopping": True,
             "model__scoring": self.ctx.config.scoring,
             "model__validation_fraction": 0.1,
-            "model__n_iter_no_change": randint(int(10 * k), int(20 * k)),
+            "model__n_iter_no_change": randint(10, 30),
             "model__random_state": self.ctx.config.seed,
-            "model__max_iter": randint(int(500 * k), int(1000 * k)),
-            "model__learning_rate": uniform(0.001, 0.1 / k),
-            "model__max_depth": randint(max(2, int(3 * k)), max(3, int(10 * k))),
-            "model__max_leaf_nodes": randint(max(2, int(20 * k)), max(3, int(150 * k))),
-            "model__min_samples_leaf": randint(1, max(2, int(50 / k))),
-            "model__l2_regularization": uniform(0.0, max(1e-6, 1.0 / k)),
-            "model__max_features": uniform(min(0.99, 0.5 + 0.5 * (1 - 1 / k)), min(0.01, 0.5 / k)),
+            "model__max_iter": randint(300, 1500),
+            "model__learning_rate": loguniform(0.005, 0.5),
+            "model__max_depth": randint(2, 32),
+            "model__max_leaf_nodes": randint(8, 512),
+            "model__min_samples_leaf": randint(1, 200),
+            "model__l2_regularization": uniform(0.0, 100.0),
+            "model__max_features": uniform(0.3, 0.7),  # [0.3, 1.0]
             "model__class_weight": ["balanced"],
         }
 

@@ -13,18 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-_EPS = 1e-12
-
-
-def _standardize(values: np.ndarray) -> np.ndarray | None:
-    """Return a zero-mean unit-std vector (NaNs -> 0), or ``None`` if constant."""
-    x = np.asarray(values, dtype=float).ravel()
-    mean = np.nanmean(x)
-    std = np.nanstd(x)
-    if not np.isfinite(std) or std < _EPS:
-        return None
-    z = (x - mean) / std
-    return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
+from kaggle_pipeline.evolution.utils.arrays import abs_correlation, standardize_for_correlation
 
 
 class FeatureSimilarity:
@@ -55,19 +44,18 @@ class FeatureSimilarity:
         correlation -- the feature's redundancy score (0 if it has no peers or is
         constant on the sample).
         """
-        vec = _standardize(values)
+        vec = standardize_for_correlation(values)
         if vec is None:
             # Constant on the sample: no usable numeric similarity.
             self._neighbors[feature_id] = []
             return 0.0
 
-        n = vec.size
         sims: list[tuple[str, float]] = []
         for other_id, other_vec in self._vectors.items():
-            if other_id == feature_id or other_vec.size != n:
+            if other_id == feature_id:
                 continue
-            corr = abs(float(np.dot(vec, other_vec) / n))
-            if not np.isfinite(corr):
+            corr = abs_correlation(vec, other_vec)
+            if corr is None:
                 continue
             sims.append((other_id, corr))
             self._record_neighbor(other_id, feature_id, corr)
@@ -89,24 +77,23 @@ class FeatureSimilarity:
         Used to score a generation candidate before it is admitted, so a redundant
         feature can be rejected without polluting the stored similarity state.
         """
-        vec = _standardize(values)
+        vec = standardize_for_correlation(values)
         if vec is None or not self._vectors:
             return 0.0
         best = 0.0
         for other_vec in self._vectors.values():
-            if other_vec.size != vec.size:
-                continue
-            corr = abs(float(np.dot(vec, other_vec) / vec.size))
-            if np.isfinite(corr) and corr > best:
+            corr = abs_correlation(vec, other_vec)
+            if corr is not None and corr > best:
                 best = corr
         return best
 
     def get(self, a: str, b: str) -> float:
         """Absolute correlation between two features if both have sample vectors."""
         va, vb = self._vectors.get(a), self._vectors.get(b)
-        if va is None or vb is None or va.size != vb.size:
+        if va is None or vb is None:
             return 0.0
-        return abs(float(np.dot(va, vb) / va.size))
+        corr = abs_correlation(va, vb)
+        return corr if corr is not None else 0.0
 
     def redundancy(self, feature_id: str) -> float:
         neighbors = self._neighbors.get(feature_id)

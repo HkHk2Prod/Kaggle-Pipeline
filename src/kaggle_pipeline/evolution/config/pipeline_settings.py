@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 
 from kaggle_pipeline.evolution.config.settings import EvolutionSettings
+from kaggle_pipeline.preprocessing.encoders import ONEHOT_MAX_CARDINALITY
 
 _HOUR = 60 * 60
 
@@ -66,8 +67,8 @@ class KagglePipelineSettings:
     allow_generated_feature_parents: bool = True
     cv_splits: int = 5
     # Cardinality cap above which a categorical is frequency-encoded rather than
-    # one-hot (keeps materialized width bounded). Matches v1 onehot_max_cardinality.
-    onehot_max_cardinality: int = 20
+    # one-hot (keeps materialized width bounded). Shares the v1 default.
+    onehot_max_cardinality: int = ONEHOT_MAX_CARDINALITY
     # Fraction of the training rows (randomly, stratified, sampled) that models are
     # trained/cross-validated on during the search, to evaluate many more candidates
     # per unit time. Ensemble winners are refit on the FULL data at finalization.

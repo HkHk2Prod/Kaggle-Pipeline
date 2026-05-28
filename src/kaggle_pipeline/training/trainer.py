@@ -7,10 +7,10 @@ import logging
 import time
 
 import numpy as np
-from sklearn.model_selection import StratifiedKFold
 
 from kaggle_pipeline.context import PipelineContext
 from kaggle_pipeline.search import Judge
+from kaggle_pipeline.search.cv import make_cv_splitter
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def run_training(ctx: PipelineContext) -> np.ndarray:
     config = ctx.config
     start_time = time.perf_counter()
 
-    cv = StratifiedKFold(n_splits=config.cv_splits, shuffle=True, random_state=config.seed)
+    cv = make_cv_splitter(n_splits=config.cv_splits, seed=config.seed, task=config.task)
     judge = Judge(ctx, cv)
     judge.load()
 
@@ -44,8 +44,4 @@ def run_training(ctx: PipelineContext) -> np.ndarray:
             logger.info("We are low on time and stop the training cycle.")
             break
 
-    # Each step logs the full leaderboard (with complexities) at the verbose
-    # level; report the final complexities once at the normal level here so they
-    # are visible without the full per-step table.
-    logger.info("%s", judge.format_complexities())
     return judge.predict()
