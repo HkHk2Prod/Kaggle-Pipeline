@@ -20,7 +20,7 @@ class Datasets:
     sample: pd.DataFrame
 
 
-def load_datasets(config: Config, data_dir: Path) -> Datasets:
+def load_datasets(config: Config, data_dir: Path, *, check_nulls: bool = True) -> Datasets:
     """Read the three CSVs and, if ``config.speed_up``, subsample for debugging.
 
     Any CSV filename or problem-definition field left as ``None`` on the config
@@ -30,6 +30,11 @@ def load_datasets(config: Config, data_dir: Path) -> Datasets:
 
     Subsampling mirrors the notebook: the first N rows of each frame so a full
     run completes in seconds while you iterate on the pipeline itself.
+
+    The v1 ``run`` flow has no imputer, so by default a null in train/test raises
+    early. Callers that *do* impute (the evolutionary ``KagglePipeline`` imputes
+    numerics and treats missing categoricals as their own level) can pass
+    ``check_nulls=False`` to load null-bearing data.
     """
     resolve_csv_filenames(config, data_dir)
     # resolve_csv_filenames fills any unset filename (or raises), so all three
@@ -48,7 +53,8 @@ def load_datasets(config: Config, data_dir: Path) -> Datasets:
         test = test[: config.speed_up_test_rows].copy()
         sample = sample[: config.speed_up_test_rows].copy()
 
-    _check_no_nulls(train, test)
+    if check_nulls:
+        _check_no_nulls(train, test)
     return Datasets(train=train, test=test, sample=sample)
 
 
