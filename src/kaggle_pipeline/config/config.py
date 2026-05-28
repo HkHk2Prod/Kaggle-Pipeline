@@ -107,17 +107,6 @@ class Config:
     # one-layer-per-level plot. Only affects plotting.
     max_plot_cats: int = 20
 
-    # --- Feature pruning ----------------------------------------------------
-    # Automatically drop predictors that are uncorrelated with the target or
-    # redundant with another predictor; thresholds are inferred from the dataset
-    # size (see :mod:`kaggle_pipeline.preprocessing.selection`). On by default.
-    prune_features: bool = True
-    # Significance level for the size-inferred thresholds: the irrelevance cut-off
-    # tau(n) and the (1 - prune_alpha) redundancy confidence bound.
-    prune_alpha: float = 0.05
-    # Confident-association floor above which two predictors are deemed redundant.
-    redundancy_floor: float = 0.90
-
     # --- Model search -------------------------------------------------------
     # Number of model-search batches to run. Set to ``None`` to instead run until
     # ``max_running_time`` is the only thing that stops the search (the Kaggle
@@ -201,10 +190,6 @@ class Config:
         # here rather than requiring the user to write entries in lower case.
         self.order_lists = [[str(v).lower() for v in group] for group in self.order_lists]
         self._validate_categorical_encoding()
-        if not 0.0 < self.prune_alpha < 1.0:
-            raise ValueError(f"prune_alpha must be in (0, 1), got {self.prune_alpha}.")
-        if not 0.0 <= self.redundancy_floor <= 1.0:
-            raise ValueError(f"redundancy_floor must be in [0, 1], got {self.redundancy_floor}.")
         if not 0.0 <= self.correlation_tau <= 1.0:
             raise ValueError(f"correlation_tau must be in [0, 1], got {self.correlation_tau}.")
         if self.onehot_max_cardinality is not None and self.onehot_max_cardinality < 1:
