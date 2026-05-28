@@ -124,9 +124,7 @@ class _SanitizeFeatureNames(BaseEstimator, TransformerMixin):
 
     def transform(self, X: Any) -> Any:
         if hasattr(X, "rename"):
-            return X.rename(
-                columns=lambda c: _LGBM_FORBIDDEN_NAME_CHARS.sub("_", str(c))
-            )
+            return X.rename(columns=lambda c: _LGBM_FORBIDDEN_NAME_CHARS.sub("_", str(c)))
         return X
 
 
