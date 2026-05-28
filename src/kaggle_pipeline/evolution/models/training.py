@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -45,9 +45,6 @@ from kaggle_pipeline.evolution.utils.arrays import is_missing
 from kaggle_pipeline.evolution.utils.logging import get_logger
 from kaggle_pipeline.preprocessing.encoders import ONEHOT_MAX_CARDINALITY, _make_encoder
 from kaggle_pipeline.search.cv import CrossValScore
-
-if TYPE_CHECKING:
-    from kaggle_pipeline.context import PipelineContext
 
 logger = get_logger(__name__)
 
@@ -128,7 +125,7 @@ class ModelTrainer:
         train_frame: pd.DataFrame,
         y: np.ndarray,
         splits: list[tuple[np.ndarray, np.ndarray]],
-        ctx: PipelineContext,
+        ctx: Any,
         task: str = "classification",
         seed: int | None = None,
     ) -> ModelResult:

@@ -43,9 +43,13 @@ def _fast_pipeline(tmp_path, **overrides):
         max_active_features=20,
         num_workers=2,
         seed=1,
-        ensemble_min_models=2,
-        ensemble_max_models=8,
+        ensemble_min_models=overrides.pop("ensemble_min_models", 2),
+        ensemble_max_models=overrides.pop("ensemble_max_models", 8),
         state_dir=str(tmp_path / "state"),
+        # Tests opt out of auto-submission by default so they don't write
+        # `submission.csv` into the working directory; the auto-submit test
+        # below overrides this back to True explicitly.
+        make_submission_on_run=overrides.pop("make_submission_on_run", False),
         **overrides,
     )
     pipeline = KagglePipeline(settings)
@@ -184,6 +188,56 @@ def test_silent_verbosity_prints_nothing(tmp_path):
         )
         == ""
     )
+
+
+def test_make_submission_on_run_writes_csv_inside_fit(tmp_path):
+    # With the flag set, fit() -> run() -> make_submission all happen in one
+    # call -- no separate make_submission() needed afterwards. The budget is
+    # large enough that the dynamic submission estimate (per-model time *
+    # 1/sample_fraction * 1.3 * ensemble_size) fits within the run.
+    warnings.simplefilter("ignore")
+    train, test = _data()
+    out_path = tmp_path / "auto_submission.csv"
+    pipeline = _fast_pipeline(
+        tmp_path,
+        max_runtime_seconds=60,
+        make_submission_on_run=True,
+        submission_path=str(out_path),
+        ensemble_max_models=2,
+        search_sample_fraction=1.0,
+        # Small bootstrap so the run isn't gated by the 30-min default before
+        # the dynamic estimator overwrites it after the first batch.
+        submission_time_reserve_seconds=5,
+    )
+    try:
+        pipeline.fit(train, target="target", test_df=test, id_col="id")
+        assert out_path.exists(), "auto-submission should have written the CSV"
+        written = pd.read_csv(out_path)
+        assert len(written) == len(test)
+    finally:
+        pipeline.shutdown()
+
+
+def test_make_submission_on_run_skips_when_no_test_data(tmp_path):
+    # If fit() got no test_df, auto-submission has nothing to predict on -- it
+    # must skip silently rather than raising.
+    warnings.simplefilter("ignore")
+    train, _ = _data()
+    out_path = tmp_path / "should_not_exist.csv"
+    pipeline = _fast_pipeline(
+        tmp_path,
+        max_runtime_seconds=60,
+        make_submission_on_run=True,
+        submission_path=str(out_path),
+        ensemble_max_models=2,
+        search_sample_fraction=1.0,
+        submission_time_reserve_seconds=5,
+    )
+    try:
+        pipeline.fit(train, target="target", id_col="id")  # no test_df
+        assert not out_path.exists()
+    finally:
+        pipeline.shutdown()
 
 
 def test_ensembling_can_be_disabled(tmp_path):

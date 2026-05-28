@@ -1,11 +1,4 @@
-"""Stateless-config scikit-learn transformers used before training.
-
-Three transformers, applied in order by :func:`build_pretrain_pipeline`:
-
-* :class:`FeatureEngineer`     -- derive new columns from ``df.eval`` expressions.
-* :class:`CategoricalTyper`    -- order categories and cast objects to ``category``.
-* :class:`OrdinalEncoderTransformer` -- integer-encode detected ordinal columns.
-"""
+"""Stateless-config scikit-learn transformers used in feature engineering and EDA."""
 
 from __future__ import annotations
 
@@ -14,11 +7,7 @@ from collections.abc import Sequence
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
-from kaggle_pipeline.preprocessing.columns import (
-    detect_ordinal_order_cols,
-    is_num_check,
-    make_cat_order,
-)
+from kaggle_pipeline.preprocessing.columns import is_num_check, make_cat_order
 
 
 class FeatureEngineer(BaseEstimator, TransformerMixin):
@@ -76,51 +65,10 @@ class CategoricalTyper(BaseEstimator, TransformerMixin):
         X = pd.DataFrame(X).copy()
         for col, cats in self.ordered_cats_.items():
             if col in X.columns:
-                # Values unseen at fit time (e.g. a test-only category) are mapped
-                # to NaN explicitly. Passing them to pd.Categorical is deprecated
-                # and will raise in a future pandas; masking first preserves the
-                # existing unseen -> NaN behaviour without the deprecated path.
+                # Values unseen at fit time map to NaN (passing them straight to
+                # pd.Categorical is deprecated and will raise in a future pandas).
                 known = X[col].where(X[col].isin(cats))
                 X[col] = pd.Categorical(known, categories=cats, ordered=True)
         obj_cols = X.select_dtypes(include=["object", "string"]).columns
         X[obj_cols] = X[obj_cols].astype("category")
-        return X
-
-
-class OrdinalEncoderTransformer(BaseEstimator, TransformerMixin):
-    """Integer-encode columns whose values match a known ordering.
-
-    Ordinal columns (excluding the target) are detected via
-    :func:`detect_ordinal_order_cols` and mapped to ``0, 1, 2, ...`` in natural
-    order. The target is left untouched here -- it is handled separately by the
-    target transforms so submissions can be decoded back to labels.
-    """
-
-    def __init__(
-        self,
-        target: Sequence[str] | None = None,
-        order_lists: Sequence[Sequence[str]] | None = None,
-    ):
-        self.target = target
-        self.order_lists = order_lists
-
-    def fit(self, X, y=None):
-        X = pd.DataFrame(X)
-        target = list(self.target or [])
-        non_target_cols = [c for c in X.columns if c not in target]
-        ordered = detect_ordinal_order_cols(X[non_target_cols], self.order_lists or [])
-        self.mappings_ = {
-            col: {cat: i for i, cat in enumerate(order)} for col, order in ordered.items()
-        }
-        return self
-
-    def transform(self, X, y=None):
-        X = pd.DataFrame(X).copy()
-        for col, mapping in self.mappings_.items():
-            if col in X.columns:
-                # ``pd.to_numeric`` forces an integer (or float, if there are
-                # unmapped values) result. Without it, pandas >= 3.0 keeps the
-                # source ``category`` dtype through ``.map``, so the encoded
-                # column would still be treated as categorical downstream.
-                X[col] = pd.to_numeric(X[col].map(mapping))
         return X

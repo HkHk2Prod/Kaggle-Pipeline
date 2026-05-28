@@ -1,7 +1,5 @@
-"""Model search: cross-validation, the leaderboard, and the judge."""
+"""Model search: shared cross-validation primitives used by the evolutionary trainer."""
 
-from kaggle_pipeline.search.cv import CrossValScore
-from kaggle_pipeline.search.judge import Judge
-from kaggle_pipeline.search.leaderboard import LeaderBoard, ModelClass, ModelEntry
+from kaggle_pipeline.search.cv import CrossValScore, make_cv_splitter
 
-__all__ = ["CrossValScore", "Judge", "LeaderBoard", "ModelClass", "ModelEntry"]
+__all__ = ["CrossValScore", "make_cv_splitter"]

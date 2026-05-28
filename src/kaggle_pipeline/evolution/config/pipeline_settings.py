@@ -31,6 +31,21 @@ class KagglePipelineSettings:
     checkpoint_time_reserve_seconds: float = 2 * 60
     ensemble_time_reserve_seconds: float = 30 * 60
     finalization_time_reserve_seconds: float = 5 * 60
+    # Bootstrap reserve held back for the submission step (refit each ensemble
+    # member on the FULL train data, predict test, write CSV). Only carved out
+    # of the training window when ``make_submission_on_run`` is True. Once the
+    # pipeline has measured per-model timings it overwrites the live reserve
+    # with a data-aware estimate (see ``_estimated_submission_seconds``), so
+    # this value only matters at startup and as a floor.
+    submission_time_reserve_seconds: float = 30 * 60
+
+    # --- submission ---------------------------------------------------------
+    # When True, ``run()`` writes the submission CSV before returning (using the
+    # ``sample_df`` / ``test_df`` passed to ``fit``) and the submission reserve
+    # is subtracted from the training budget. When False, the user calls
+    # ``make_submission`` themselves and run() reserves nothing for it.
+    make_submission_on_run: bool = True
+    submission_path: str = "submission.csv"
 
     # --- verbosity ----------------------------------------------------------
     # Default 3 (DETAILED) mirrors the v1 Config's default ``verbosity="verbose"``.
@@ -103,6 +118,8 @@ class KagglePipelineSettings:
             raise ValueError(
                 f"search_sample_fraction must be in (0, 1], got {self.search_sample_fraction}"
             )
+        if self.submission_time_reserve_seconds < 0:
+            raise ValueError("submission_time_reserve_seconds must be >= 0")
 
     # --- derived ------------------------------------------------------------
     def evolution_settings(self) -> EvolutionSettings:

@@ -10,7 +10,7 @@ from the OOF store when available.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -25,9 +25,6 @@ from kaggle_pipeline.evolution.models.mutation import ModelMutator, MutationReco
 from kaggle_pipeline.evolution.models.registry import ModelPopulation
 from kaggle_pipeline.evolution.models.training import ModelResult, ModelTrainer
 from kaggle_pipeline.evolution.utils.random import spawn_rng
-
-if TYPE_CHECKING:
-    from kaggle_pipeline.context import PipelineContext
 
 GENERATE = "generate"
 MUTATE = "mutate"
@@ -126,7 +123,7 @@ class ModelController:
         *,
         batch: int,
         train_frame: pd.DataFrame,
-        scoring_ctx: PipelineContext,
+        scoring_ctx: Any,
         y: np.ndarray,
         splits: list[tuple[np.ndarray, np.ndarray]],
         task: str = "classification",
