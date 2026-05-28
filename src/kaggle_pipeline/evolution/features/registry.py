@@ -332,7 +332,7 @@ class FeatureRegistry:
 
     # --- deletion / insertion ----------------------------------------------
     def find_weakest_removable_feature(self) -> FeatureGenome | None:
-        return self.deletion.weakest(self.get_removable_features())
+        return self.deletion.weakest(self.get_removable_features(), self.current_batch)
 
     def maybe_insert_generated_feature(self, genome: FeatureGenome) -> InsertionResult:
         """Insert a *scored* generated candidate, evicting the weakest if the pool is full.
@@ -355,7 +355,9 @@ class FeatureRegistry:
             return InsertionResult(genome, INSERTED)
 
         weakest = self.find_weakest_removable_feature()
-        if weakest is not None and self.deletion.score(genome) > self.deletion.score(weakest):
+        if weakest is not None and self.deletion.score(
+            genome, self.current_batch
+        ) > self.deletion.score(weakest, self.current_batch):
             weakest.active = False
             self.similarity.remove(weakest.feature_id)
             genome.active = True
