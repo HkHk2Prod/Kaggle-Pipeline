@@ -2,8 +2,8 @@
 
 Each ``step`` draws a batch of model classes from the leaderboard, samples and
 cross-validates a model from each (in parallel threads), records the scores,
-adapts complexities and then permanently drops models whose out-of-fold residuals
-just duplicate a better one's mistakes (``prune_correlated_models``; see
+and then permanently drops models whose out-of-fold residuals just duplicate a
+better one's mistakes (``prune_correlated_models``; see
 :mod:`kaggle_pipeline.search.decorrelation`) -- so de-correlation happens as the
 board grows rather than only at the end. After the search ``predict`` stacks the
 surviving models' out-of-fold predictions with a logistic-regression meta-model
@@ -69,8 +69,7 @@ class Judge:
     def _evaluate_one(self, cls_name, X, y, splits, rng=None):
         timer = time.perf_counter()
         model_cls = registry[cls_name]
-        model_complexity = self.board.complexity(cls_name)
-        model = model_cls(self.ctx, rng=rng, complexity=model_complexity)
+        model = model_cls(self.ctx, rng=rng)
         cv_results = CrossValScore(model, X, y, splits=splits, ctx=self.ctx)
         score, std = cv_results.score
         timer = time.perf_counter() - timer
@@ -113,7 +112,6 @@ class Judge:
             logger.info("%s", summary)
             logger.debug("%s", params_msg)
             self.board.add(cls_name, entry)
-        self.board.evaluate_models()
         # De-correlate after every batch: as the new models join the board, drop any
         # that just duplicate a better model's mistakes so a dominant class can't
         # crowd the board (and later the ensemble) with near-copies of itself.
@@ -301,10 +299,6 @@ class Judge:
             logger.debug("The leaderboard is: \n %s \n\n", self)
         else:
             logger.info("No existing leaderboard found; starting a new one.")
-
-    def format_complexities(self) -> str:
-        """One-line summary of the leaderboard's per-class complexities."""
-        return self.board.format_complexities()
 
     def __str__(self) -> str:
         return self.board.__str__()

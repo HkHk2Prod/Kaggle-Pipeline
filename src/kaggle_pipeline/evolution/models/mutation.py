@@ -20,21 +20,14 @@ from typing import Any
 import numpy as np
 
 from kaggle_pipeline.evolution.config import EvolutionSettings
-from kaggle_pipeline.evolution.features.recipe import CATEGORICAL
 from kaggle_pipeline.evolution.features.registry import FeatureRegistry
 from kaggle_pipeline.evolution.genes.base import MutationContext
-from kaggle_pipeline.evolution.genes.encoding_gene import (
-    FREQUENCY,
-    NATIVE,
-    NATIVE_CAPABLE_ENCODINGS,
-    NON_NATIVE_ENCODINGS,
-    EncodingGene,
-)
 from kaggle_pipeline.evolution.genes.feature_reference_gene import FeatureReferenceGene
 from kaggle_pipeline.evolution.genes.mutation import (
     sample_num_mutated_genes,
     sample_signed_amount,
 )
+from kaggle_pipeline.evolution.models.factory import make_encoding_gene
 from kaggle_pipeline.evolution.models.genome import ModelGenome
 from kaggle_pipeline.evolution.models.lifecycle import ModelStatus
 from kaggle_pipeline.evolution.models.parameter_spaces import (
@@ -248,15 +241,15 @@ class ModelMutator:
             return
         gene = FeatureReferenceGene(new_id)
         feature = self.registry.get_feature(new_id)
-        if feature.output_type == CATEGORICAL:
-            fam = self.families.get(parent.family)
-            native = fam.handles_categoricals if fam else False
-            gene.set_encoding(
-                EncodingGene(
-                    NATIVE if native else FREQUENCY,
-                    alternatives=NATIVE_CAPABLE_ENCODINGS if native else NON_NATIVE_ENCODINGS,
-                )
-            )
+        fam = self.families.get(parent.family)
+        encoding = make_encoding_gene(
+            feature,
+            handles_categoricals=fam.handles_categoricals if fam else False,
+            onehot_max_cardinality=self.settings.onehot_max_cardinality,
+            rng=rng,
+        )
+        if encoding is not None:
+            gene.set_encoding(encoding)
         feature_genes.append(gene)
         record.mutated_gene_ids.append(gene.gene_id)
         record.signed_amounts.append(1.0)

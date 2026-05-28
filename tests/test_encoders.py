@@ -190,7 +190,7 @@ def test_driver_is_a_categorical_predictor_defaulting_to_frequency(highcard_ctx)
 @pytest.mark.parametrize("name", ["RandomForestClassifier", "LogisticRegression"])
 def test_non_native_models_encode_without_exploding_or_erroring(name, highcard_ctx):
     ctx = highcard_ctx
-    model = registry[name](ctx, complexity=1.0)
+    model = registry[name](ctx)
     proba = _fit_predict(model, ctx)
 
     assert proba.shape[0] == len(ctx.test_df)  # unseen test drivers did not error
@@ -203,7 +203,7 @@ def test_non_native_models_encode_without_exploding_or_erroring(name, highcard_c
 
 def test_histgb_passes_moderate_cardinality_natively(highcard_ctx):
     ctx = highcard_ctx
-    model = HistGBClassifierModel(ctx, complexity=1.0)
+    model = HistGBClassifierModel(ctx)
     proba = _fit_predict(model, ctx)
     assert proba.shape[0] == len(ctx.test_df)
     # driver (~40 levels) is under the 255 cap, so it is a native categorical.
@@ -215,7 +215,7 @@ def test_explicit_target_encoding_wires_through_to_a_non_native_model(tmp_path: 
     # checks that y propagates to it through the model pipeline's fit.
     ctx = _build_highcard_ctx(tmp_path, categorical_encoding={"driver": "target"})
     assert ctx.categorical_encoding["driver"] == "target"
-    model = registry["LogisticRegression"](ctx, complexity=1.0)
+    model = registry["LogisticRegression"](ctx)
     proba = _fit_predict(model, ctx)
     assert proba.shape[0] == len(ctx.test_df)
     preprocessor = model._model.named_steps["preprocessor"]
@@ -226,7 +226,7 @@ def test_explicit_target_encoding_wires_through_to_a_non_native_model(tmp_path: 
 def test_drop_strategy_removes_the_column_for_a_non_native_model(tmp_path: Path):
     ctx = _build_highcard_ctx(tmp_path, categorical_encoding={"driver": "drop"})
     assert ctx.categorical_encoding["driver"] == "drop"
-    model = registry["LogisticRegression"](ctx, complexity=1.0)
+    model = registry["LogisticRegression"](ctx)
     proba = _fit_predict(model, ctx)
     assert proba.shape[0] == len(ctx.test_df)
     # The dropped categorical contributes no features: only the numerics remain.
@@ -239,7 +239,7 @@ def test_histgb_encodes_above_native_cardinality_cap(monkeypatch, highcard_ctx):
     # Force the cap below driver's cardinality so it must be encoded instead.
     monkeypatch.setattr(HistGBClassifierModel, "native_cardinality_cap", 5)
     ctx = highcard_ctx
-    model = HistGBClassifierModel(ctx, complexity=1.0)
+    model = HistGBClassifierModel(ctx)
     proba = _fit_predict(model, ctx)
     assert proba.shape[0] == len(ctx.test_df)
     # No native categorical features: the over-cap column was frequency-encoded.

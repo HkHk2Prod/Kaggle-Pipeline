@@ -13,13 +13,13 @@ from kaggle_pipeline.models.registry import register_model
     name="LogisticRegression", purposes="single_target_prob_pred", lower=0.02, upper=0.05
 )
 class LogisticRegressionModel(Model):
-    def generate_distribution(self, complexity):
-        k = complexity
+    def generate_distribution(self):
+        # Wide fixed range: C spans eight orders of magnitude so a single sample
+        # may land anywhere from heavily regularised to nearly unconstrained.
         return {
             "model__random_state": self.ctx.config.seed,
-            "model__max_iter": int(400 * k),
-            "model__C": loguniform(1e-2 * k, 1.0 * k),
-            # "model__l1_ratio": uniform(0.05, 0.9),
+            "model__max_iter": 1000,
+            "model__C": loguniform(1e-4, 1e4),
             "model__solver": "lbfgs",
             "model__class_weight": "balanced",
         }

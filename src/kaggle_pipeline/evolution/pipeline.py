@@ -105,6 +105,7 @@ class KagglePipeline:
         self._search_y: np.ndarray | None = None
         self._test_features: pd.DataFrame | None = None
         self._test_ids: Any = None
+        self._test_has_ids: bool = False  # did the test set carry a real id column?
         self._sample: pd.DataFrame | None = None  # sample_submission template
         self._y: np.ndarray | None = None
         self._classes: np.ndarray | None = None
@@ -216,10 +217,9 @@ class KagglePipeline:
 
         if test_df is not None:
             test_eng = self._engineer(test_df, feature_expressions)
+            self._test_has_ids = id_col in test_eng.columns
             self._test_ids = (
-                test_eng[id_col].to_numpy()
-                if id_col in test_eng.columns
-                else np.arange(len(test_eng))
+                test_eng[id_col].to_numpy() if self._test_has_ids else np.arange(len(test_eng))
             )
             self._test_features = test_eng.drop(columns=[id_col], errors="ignore")
 
@@ -377,7 +377,10 @@ class KagglePipeline:
         names = summary.generated_feature_names
         if not names:
             return
-        self.log(f"features: +{len(names)} new ({summary.n_features_active} active)", level=Verbosity.SUMMARY)
+        self.log(
+            f"features: +{len(names)} new ({summary.n_features_active} active)",
+            level=Verbosity.SUMMARY,
+        )
         self.log("  new feature columns: " + ", ".join(names), level=Verbosity.DETAILED)
         if self.settings.verbosity >= Verbosity.DEBUG and self.controller is not None:
             detail = []
@@ -502,21 +505,53 @@ class KagglePipeline:
     def _submission_from_sample(
         self, sample: pd.DataFrame, predictions: np.ndarray
     ) -> pd.DataFrame:
-        """Build a submission matching the sample_submission's columns/structure."""
+        """Build a submission matching the sample_submission's columns/structure.
+
+        ``predictions`` are in test-row order (the order of ``self._test_ids``).
+        The sample submission is *not* guaranteed to share that order, so rows are
+        matched to the sample on the id column rather than by position -- aligning
+        by position silently scrambles every prediction whenever the two files are
+        sorted differently. The id sets are asserted equal first so a mismatch
+        fails loudly instead of yielding a submission full of nulls, and the
+        sample's column order is preserved. When the test set carried no id column
+        there is nothing to join on, so we fall back to positional alignment.
+        """
         columns = list(sample.columns)
         id_col = self._id_col if self._id_col in columns else columns[0]
         target_cols = [c for c in columns if c != id_col]
         proba = np.asarray(predictions, dtype=float)
 
-        frame = pd.DataFrame({id_col: self._test_ids})
+        # Tag the predictions with the test ids (same row order as ``proba``),
+        # coercing the ids back to the sample's dtype so the join matches.
+        preds = pd.DataFrame({id_col: np.asarray(self._test_ids)})
+        if self._test_has_ids:
+            preds[id_col] = preds[id_col].astype(sample[id_col].dtype)
         if len(target_cols) == 1:
-            frame[target_cols[0]] = self._decode_single(proba)
+            preds[target_cols[0]] = self._decode_single(proba)
         else:
             # One probability column per class (sample order assumed = class order).
             matrix = proba if proba.ndim == 2 else proba.reshape(-1, 1)
             for i, col in enumerate(target_cols):
-                frame[col] = matrix[:, i] if i < matrix.shape[1] else 0.0
-        return frame[columns]  # preserve the sample's column order
+                preds[col] = matrix[:, i] if i < matrix.shape[1] else 0.0
+
+        if not self._test_has_ids:
+            return preds[columns]  # no real ids to align on; keep test order
+
+        sample_ids = set(sample[id_col].tolist())
+        pred_ids = set(preds[id_col].tolist())
+        if sample_ids != pred_ids:
+            raise ValueError(
+                f"Test ids and sample-submission ids do not match on {id_col!r}: "
+                f"{len(pred_ids)} test id(s) vs {len(sample_ids)} sample id(s), "
+                f"{len(pred_ids & sample_ids)} in common. Cannot build a submission."
+            )
+        result = sample.drop(columns=target_cols).merge(preds, on=id_col, how="left")
+        if len(result) != len(sample):
+            raise ValueError(
+                f"Joining predictions on {id_col!r} changed the row count "
+                f"({len(sample)} -> {len(result)}); the id column is not unique."
+            )
+        return result[columns]  # preserve the sample's column order
 
     def _decode_single(self, proba: np.ndarray) -> np.ndarray:
         """Decode predictions into one submission column per ``prediction_aim``."""

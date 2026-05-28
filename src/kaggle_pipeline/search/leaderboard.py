@@ -3,8 +3,7 @@
 The leaderboard holds, for each model class, a score-sorted list of
 :class:`ModelEntry` records (each pointing at a pickled model on disk). It
 enforces per-class ``lower``/``upper`` capacity bounds and a global cap, evicts
-the weakest evictable entry when full, and adapts each class's ``complexity``
-based on score-per-log-compute-time. It also picks which class to try next and
+the weakest evictable entry when full, picks which class to try next and
 selects the final ensemble members.
 """
 
@@ -107,7 +106,6 @@ class LeaderBoard:
 
     def __init__(self, num_models: int, storage_dir: Path, seed_seq: np.random.SeedSequence):
         self.classes: dict[str, ModelClass] = {}
-        self._complexities: dict[str, float] = {}
         self.num_models = num_models
         # Runtime-coupled; not restored from a loaded board (see ``load``).
         self.storage_dir = storage_dir
@@ -118,7 +116,6 @@ class LeaderBoard:
         self.classes[name] = ModelClass(
             lower=self._resolve_bound(lower), upper=self._resolve_bound(upper)
         )
-        self._complexities[name] = 1.0
 
     def _resolve_bound(self, value: int | float) -> int:
         """Resolve a capacity bound to an absolute count.
@@ -131,54 +128,6 @@ class LeaderBoard:
         if isinstance(value, float):
             return math.ceil(value * self.num_models)
         return int(value)
-
-    def increase_complexity(self, name: str | None = None, val: float = 0.5) -> None:
-        names = self._complexities.keys() if name is None else [name]
-        for name in names:
-            self._complexities[name] += val
-            self._complexities[name] = max(self._complexities[name], 1.0)
-
-    def complexity(self, name: str) -> float:
-        return self._complexities[name]
-
-    def format_complexities(self) -> str:
-        """One-line, human-readable summary of each class's current complexity."""
-        formatted = {name: round(float(c), 3) for name, c in self._complexities.items()}
-        return f"Complexities of the models are {formatted}"
-
-    def evaluate_models(self) -> None:
-        """Adjust each class's complexity from score-per-log-compute-time.
-
-        Scores are shifted to be positive, divided by ``log1p(compute_time)``,
-        then standardised across all entries; each class's mean of that quantity
-        (scaled down by 10) becomes its complexity increment. Complexities across
-        classes are not directly comparable -- this is a heuristic that nudges
-        cheaper, better-scoring classes toward more capacity.
-        """
-        cls_scores = {
-            name: np.array([e.score for e in cl.entries]) for name, cl in self.classes.items()
-        }
-        times = {
-            name: np.array([e.compute_time for e in cl.entries])
-            for name, cl in self.classes.items()
-        }
-
-        min_score = min(s for scores in cls_scores.values() for s in scores)
-        adjusted = {
-            name: (cls_scores[name] - min_score) / np.log1p(times[name]) for name in self.classes
-        }
-
-        all_adjusted = np.concatenate(list(adjusted.values()))
-        mean_as, std_as = all_adjusted.mean(), all_adjusted.std()
-
-        for name, adj in adjusted.items():
-            # A class with no entries this round has nothing to learn from.
-            if adj.size == 0:
-                continue
-            # We add a small drift term std_as / 4 to avoid models from being stack at low complexity.
-            final_score = ((adj - mean_as + 0.25 * std_as) / std_as).mean()
-            final_score /= 10
-            self.increase_complexity(name=name, val=final_score)
 
     def __len__(self) -> int:
         return sum(len(c) for c in self.classes.values())
@@ -241,7 +190,6 @@ class LeaderBoard:
         output += "-" * 18 + "\n"
         for model, score in table:
             output += f"{model:<30} | {score:>10.4f}" + "\n"
-        output += self.format_complexities() + "\n"
         return output
 
     def get(self) -> str:
@@ -312,9 +260,9 @@ class LeaderBoard:
     def load(self) -> bool:
         """Restore a saved board, keeping the *current* storage dir and seed.
 
-        Everything else (classes, entries, complexities, num_models) comes from
-        the pickled board. ``storage_dir`` and ``seed_seq`` are runtime-coupled
-        and must reflect the current environment, so they are preserved.
+        Everything else (classes, entries, num_models) comes from the pickled
+        board. ``storage_dir`` and ``seed_seq`` are runtime-coupled and must
+        reflect the current environment, so they are preserved.
         """
         path = self.storage_dir / LEADERBOARD_FILENAME
         if not path.exists():

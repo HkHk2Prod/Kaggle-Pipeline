@@ -25,10 +25,24 @@ FREQUENCY = "frequency"
 COUNT = "count"
 TARGET = "target"
 
-# Sensible default alternative sets keyed by whether the model handles categoricals
-# natively. The factory picks the right set per (model family, feature) pairing.
-NATIVE_CAPABLE_ENCODINGS = (NATIVE, FREQUENCY, COUNT, ORDINAL)
+# Encodings a model that cannot consume raw categoricals may use. Models that
+# handle categoricals natively get no encoding gene at all (the factory skips it).
 NON_NATIVE_ENCODINGS = (FREQUENCY, COUNT, ONEHOT, ORDINAL)
+
+
+def allowed_encodings_for(cardinality: int | None, onehot_max_cardinality: int) -> tuple[str, ...]:
+    """Encodings permitted for a non-native model's categorical of this cardinality.
+
+    One-hot is dropped from the allowed set when the categorical has more distinct
+    levels than ``onehot_max_cardinality`` (or its cardinality is unknown), so a
+    single feature cannot explode the materialized width -- the constraint is
+    applied here, at gene-construction time, rather than only at training time.
+    """
+    alternatives = list(NON_NATIVE_ENCODINGS)
+    too_many = cardinality is None or cardinality > onehot_max_cardinality
+    if too_many and ONEHOT in alternatives:
+        alternatives.remove(ONEHOT)
+    return tuple(alternatives)
 
 
 class EncodingGene(Gene):

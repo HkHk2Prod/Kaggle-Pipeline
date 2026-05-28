@@ -16,22 +16,24 @@ class LGBMClassifierModel(Model):
     handles_categoricals = True
     _fit_params = {"model__categorical_feature": "auto"}
 
-    def generate_distribution(self, complexity):
-        k = complexity
+    def generate_distribution(self):
+        # Wide fixed ranges: leaves up to 1024, depth up to 32, reg spanning many
+        # orders of magnitude so one draw may yield a tight stub and the next a
+        # very expressive model.
         return {
             "model__verbose": -1,
             "model__random_state": self.ctx.config.seed,
             "model__n_jobs": 1,
-            "model__n_estimators": randint(int(50 * k), int(150 * k)),
-            "model__learning_rate": uniform(0.001, max(0.001, 0.1 / k)),
-            "model__max_depth": randint(max(2, int(3 * k)), max(3, int(10 * k))),
-            "model__num_leaves": randint(max(2, int(20 * k)), max(3, int(150 * k))),
-            "model__min_child_samples": randint(1, max(2, int(50 / k))),
-            "model__subsample": uniform(0.5, 0.5),
+            "model__n_estimators": randint(50, 600),
+            "model__learning_rate": loguniform(0.005, 0.5),
+            "model__max_depth": randint(2, 32),
+            "model__num_leaves": randint(4, 1024),
+            "model__min_child_samples": randint(1, 500),
+            "model__subsample": uniform(0.3, 0.7),  # [0.3, 1.0]
             "model__subsample_freq": randint(1, 10),
-            "model__colsample_bytree": uniform(0.5, 0.5),
-            "model__reg_alpha": loguniform(max(1e-8, 1e-5 / k), max(1e-7, 1.0 / k)),
-            "model__reg_lambda": uniform(0.0, max(0.01, 10.0 / k)),
+            "model__colsample_bytree": uniform(0.3, 0.7),
+            "model__reg_alpha": loguniform(1e-8, 100.0),
+            "model__reg_lambda": uniform(0.0, 200.0),
             "model__class_weights": "balanced",
         }
 

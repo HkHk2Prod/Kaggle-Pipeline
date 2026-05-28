@@ -26,7 +26,7 @@ def _judge(config: Config) -> Judge:
 
 def _add_model(judge: Judge, cls_name: str, oof: np.ndarray, score: float):
     """Save a real model of ``cls_name`` with a given OOF and add it to the board."""
-    model = registry[cls_name](judge.ctx, complexity=1.0)
+    model = registry[cls_name](judge.ctx)
     model.set_oof(oof)
     entry = judge.board.generate_model_entry(
         model=model, score=score, compute_time=1, class_name=cls_name

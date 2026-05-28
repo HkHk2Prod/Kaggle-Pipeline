@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scipy.stats import randint, uniform
+from scipy.stats import loguniform, randint, uniform
 from sklearn.pipeline import Pipeline
 
 from kaggle_pipeline.models.base import Model
@@ -15,21 +15,22 @@ class CatBoostClassifierModel(Model):
     # so the raw columns are passed through and ``categorical_encoding`` is unused.
     handles_categoricals = True
 
-    def generate_distribution(self, complexity):
-        k = complexity
+    def generate_distribution(self):
+        # Wide fixed ranges: depth up to catboost's hard cap of 16-ish, iterations
+        # up to 600, log-spaced learning rate and l2 for a diverse spectrum.
         return {
             "model__bootstrap_type": "Bernoulli",
             "model__verbose": 0,
             "model__random_seed": self.ctx.config.seed,
             "model__thread_count": 1,
-            "model__iterations": randint(int(50 * k), int(150 * k)),
-            "model__learning_rate": uniform(0.001, max(0.001, 0.1 / k)),
-            "model__depth": randint(min(14, int(3 * k)), min(16, int(10 * k))),
-            "model__min_data_in_leaf": randint(1, max(2, int(50 / k))),
-            "model__subsample": uniform(0.5, 0.5),
-            "model__colsample_bylevel": uniform(0.5, 0.5),
-            "model__l2_leaf_reg": uniform(0.0, max(0.01, 10.0 / k)),
-            "model__border_count": randint(min(32, int(32 * k)), min(255, int(255 * k))),
+            "model__iterations": randint(50, 600),
+            "model__learning_rate": loguniform(0.005, 0.5),
+            "model__depth": randint(2, 12),
+            "model__min_data_in_leaf": randint(1, 200),
+            "model__subsample": uniform(0.3, 0.7),  # [0.3, 1.0]
+            "model__colsample_bylevel": uniform(0.3, 0.7),
+            "model__l2_leaf_reg": loguniform(1.0, 100.0),
+            "model__border_count": randint(32, 255),
             "model__auto_class_weights": "Balanced",
         }
 

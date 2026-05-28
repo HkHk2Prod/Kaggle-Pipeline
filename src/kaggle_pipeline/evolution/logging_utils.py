@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import logging
 
-PACKAGE_LOGGER = "kaggle_pipeline.evolution"
-
 
 class Verbosity:
     """Verbosity levels controlling logging and state printing."""
@@ -42,18 +40,19 @@ def verbosity_to_logging_level(verbosity: int) -> int:
 
 
 def configure_logging(verbosity: int) -> logging.Logger:
-    """Set the package logger's level from ``verbosity`` and return it.
+    """Configure the shared ``kaggle_pipeline`` logger from an integer verbosity.
 
-    Attaches a basic stream handler once if none is configured, so a bare script
-    still sees output; embedders that pre-configure the logger keep their setup.
+    Delegates to :func:`kaggle_pipeline.logconfig.configure_logging` so the
+    evolutionary layer and the v1 pipeline share one handler on one logger
+    hierarchy: the evolution modules log through children of ``kaggle_pipeline``
+    and inherit it. Maintaining a second handler on the ``kaggle_pipeline.evolution``
+    child (as before) double-emitted records -- once in each layer's format --
+    whenever both configured logging in the same process. The integer 0..4
+    :class:`Verbosity` scale is mapped to a logging level here.
     """
-    logger = logging.getLogger(PACKAGE_LOGGER)
-    logger.setLevel(verbosity_to_logging_level(verbosity))
-    if not logger.handlers and not logging.getLogger().handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%H:%M:%S"))
-        logger.addHandler(handler)
-    return logger
+    from kaggle_pipeline.logconfig import configure_logging as configure_package_logging
+
+    return configure_package_logging(verbosity_to_logging_level(verbosity))
 
 
 def format_duration(seconds: float) -> str:

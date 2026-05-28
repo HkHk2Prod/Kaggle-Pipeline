@@ -55,7 +55,9 @@ def test_generation_respects_active_cap(settings, registry, eval_context, synthe
     assert any(g.score_set.has(REDUNDANCY) for g in active if not g.is_original) or True
 
 
-def test_deeper_generation_composes_on_generated_features(registry, settings, eval_context, synthetic):
+def test_deeper_generation_composes_on_generated_features(
+    registry, settings, eval_context, synthetic
+):
     # With allow_generated_feature_parents=True / max_feature_depth=2 (defaults),
     # generated features can build on other generated features, reaching depth 2.
     _, y = synthetic

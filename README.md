@@ -25,10 +25,10 @@ analyze:  detect env → load data → EDA (metadata, correlations, pairwise plo
   expressions, categorical ordering/typing, and ordinal encoding of detected
   ordinal columns.
 - **Search** (`search/`): each *step* draws a batch of model classes from the
-  leaderboard, samples hyperparameters (scaled by a per-class `complexity`
-  knob), cross-validates them in parallel, and records out-of-fold predictions.
-  The leaderboard keeps the best per class under capacity bounds and adapts each
-  class's complexity based on score-per-log-compute-time.
+  leaderboard, samples each new model's hyperparameters once from a deliberately
+  wide fixed distribution per class, cross-validates them in parallel, and
+  records out-of-fold predictions. The leaderboard keeps the best per class
+  under capacity bounds and evicts the weakest entry when full.
 - **Ensembling** (`search/judge.py`): the selected models' out-of-fold
   predictions are stacked with a logistic-regression meta-model
   (`RandomizedSearchCV`), and the decoded test predictions become the submission.
@@ -659,9 +659,10 @@ each column's chosen strategy is visible in the run log.
 
 Drop a module in `src/kaggle_pipeline/models/definitions/` with a `Model`
 subclass decorated with `@register_model`, implementing `generate_distribution`
-(hyperparameter distribution, scaled by `complexity`) and `build_pipeline`
-(the sklearn pipeline). Import it in `definitions/__init__.py`. It then
-participates in the search automatically.
+(a wide, fixed hyperparameter distribution -- one sample per new model is what
+gives the search its spectrum) and `build_pipeline` (the sklearn pipeline).
+Import it in `definitions/__init__.py`. It then participates in the search
+automatically.
 
 ## Behaviour changes vs. the original notebook
 

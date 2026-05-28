@@ -13,16 +13,11 @@ from __future__ import annotations
 import numpy as np
 
 from kaggle_pipeline.evolution.config import EvolutionSettings
+from kaggle_pipeline.evolution.features.genome import FeatureGenome
 from kaggle_pipeline.evolution.features.recipe import CATEGORICAL
 from kaggle_pipeline.evolution.features.registry import FeatureRegistry
 from kaggle_pipeline.evolution.genes.base import BaseModelGene
-from kaggle_pipeline.evolution.genes.encoding_gene import (
-    FREQUENCY,
-    NATIVE,
-    NATIVE_CAPABLE_ENCODINGS,
-    NON_NATIVE_ENCODINGS,
-    EncodingGene,
-)
+from kaggle_pipeline.evolution.genes.encoding_gene import EncodingGene, allowed_encodings_for
 from kaggle_pipeline.evolution.genes.feature_reference_gene import FeatureReferenceGene
 from kaggle_pipeline.evolution.genes.parameter_gene import ParameterGene
 from kaggle_pipeline.evolution.genes.resource_gene import ResourceGene
@@ -38,6 +33,28 @@ logger = get_logger(__name__)
 
 # Upper bound on how many features a freshly generated model may select.
 DEFAULT_MAX_FEATURES = 32
+
+
+def make_encoding_gene(
+    feature: FeatureGenome,
+    *,
+    handles_categoricals: bool,
+    onehot_max_cardinality: int,
+    rng: np.random.Generator,
+) -> EncodingGene | None:
+    """Choose a categorical feature's encoding gene, or ``None`` when not needed.
+
+    Returns ``None`` for numeric features and for families that consume
+    categoricals natively (no encoding gene is generated for them). Otherwise picks
+    an encoding from the allowed set for the feature's cardinality -- which excludes
+    one-hot when there are too many distinct levels -- and records that set as the
+    gene's mutable alternatives so later mutation stays within the same constraint.
+    """
+    if feature.output_type != CATEGORICAL or handles_categoricals:
+        return None
+    alternatives = allowed_encodings_for(feature.cardinality, onehot_max_cardinality)
+    chosen = alternatives[int(rng.integers(len(alternatives)))]
+    return EncodingGene(chosen, alternatives=alternatives)
 
 
 class ModelFactory:
@@ -116,9 +133,12 @@ class ModelFactory:
     ) -> FeatureReferenceGene:
         gene = FeatureReferenceGene(feature_id)
         feature = self.registry.get_feature(feature_id)
-        if feature.output_type == CATEGORICAL:
-            if fam.handles_categoricals:
-                gene.set_encoding(EncodingGene(NATIVE, alternatives=NATIVE_CAPABLE_ENCODINGS))
-            else:
-                gene.set_encoding(EncodingGene(FREQUENCY, alternatives=NON_NATIVE_ENCODINGS))
+        encoding = make_encoding_gene(
+            feature,
+            handles_categoricals=fam.handles_categoricals,
+            onehot_max_cardinality=self.settings.onehot_max_cardinality,
+            rng=rng,
+        )
+        if encoding is not None:
+            gene.set_encoding(encoding)
         return gene

@@ -1,10 +1,11 @@
 """The abstract :class:`Model` and the random-parameter sampler.
 
 A concrete model is the *whole* estimator pipeline (preprocessing + estimator)
-for one algorithm. Each subclass declares a hyperparameter *distribution* keyed
-by a ``complexity`` knob and knows how to build its pipeline from a sampled
-parameter set. The search machinery instantiates these, cross-validates them,
-stores out-of-fold predictions and pickles the winners.
+for one algorithm. Each subclass declares a *fixed* hyperparameter distribution
+spanning a wide range and knows how to build its pipeline from a sampled
+parameter set. The search machinery instantiates these (sampling once per
+model), cross-validates them, stores out-of-fold predictions and pickles the
+winners.
 """
 
 from __future__ import annotations
@@ -66,19 +67,18 @@ class Model(ABC):
     def __init__(
         self,
         ctx: PipelineContext,
-        complexity: float | None = None,
         param_dist: dict | None = None,
         rng: np.random.Generator | None = None,
     ):
         self.ctx = ctx
-        param_dist = param_dist or self.generate_distribution(complexity)
+        param_dist = param_dist or self.generate_distribution()
         self._param = sample_parameters(param_dist, rng=rng)
         self._oof: np.ndarray | None = None
         self._model = self.build_pipeline(self._param)
 
     @abstractmethod
-    def generate_distribution(self, complexity: float | None) -> dict:
-        """Return the hyperparameter distribution, scaled by ``complexity``."""
+    def generate_distribution(self) -> dict:
+        """Return the (wide, fixed) hyperparameter distribution for this model."""
 
     @abstractmethod
     def build_pipeline(self, param: dict):
@@ -117,11 +117,11 @@ class Model(ABC):
     def load(cls, filepath: str | Path, ctx: PipelineContext) -> Model:
         """Reconstruct a saved model and rebuild its pipeline from saved params.
 
-        Note: the notebook rebuilt the pipeline with random (complexity=1.0)
-        params and never re-applied the *saved* hyperparameters, so reloaded
-        ensemble members were refit with the wrong params. We rebuild the
-        pipeline from ``_param`` after loading so the tuned model is actually
-        the one that gets refit. (Correctness fix over the original.)
+        Note: the notebook rebuilt the pipeline with freshly sampled params and
+        never re-applied the *saved* hyperparameters, so reloaded ensemble
+        members were refit with the wrong params. We rebuild the pipeline from
+        ``_param`` after loading so the tuned model is actually the one that
+        gets refit. (Correctness fix over the original.)
         """
         filepath = Path(filepath)
         if not filepath.exists():
@@ -130,8 +130,8 @@ class Model(ABC):
             name, *loaded_vars = pickle.load(f)
 
         model_cls = registry[name]
-        # complexity is irrelevant; the params are overwritten just below.
-        model = model_cls(ctx, complexity=1.0)
+        # The freshly sampled params get overwritten just below.
+        model = model_cls(ctx)
         for var_name, value in zip(model_cls.vars_to_save, loaded_vars, strict=False):
             setattr(model, var_name, value)
         model._model = model.build_pipeline(model._param)

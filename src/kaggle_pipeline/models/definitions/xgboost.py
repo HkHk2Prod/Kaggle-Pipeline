@@ -15,8 +15,9 @@ class XGBClassifierModel(Model):
     # the raw category columns are passed through and ``categorical_encoding`` is unused.
     handles_categoricals = True
 
-    def generate_distribution(self, complexity):
-        k = complexity
+    def generate_distribution(self):
+        # Wide fixed ranges spanning shallow stumps through deep trees, with
+        # regularizers across many orders of magnitude for a diverse spectrum.
         return {
             "model__tree_method": "hist",
             "model__eval_metric": "auc",
@@ -24,15 +25,15 @@ class XGBClassifierModel(Model):
             "model__verbosity": 0,
             "model__n_jobs": 1,
             "model__random_state": self.ctx.config.seed,
-            "model__n_estimators": randint(int(50 * k), int(150 * k)),
-            "model__learning_rate": uniform(0.001, max(0.001, 0.1 / k)),
-            "model__max_depth": randint(max(2, int(3 * k)), max(3, int(10 * k))),
-            "model__min_child_weight": randint(1, max(2, int(10 / k))),
-            "model__subsample": uniform(0.5, 0.5),
-            "model__colsample_bytree": uniform(0.5, 0.5),
-            "model__gamma": uniform(0.0, max(0.01, 1.0 / k)),
-            "model__reg_alpha": loguniform(max(1e-8, 1e-5 / k), max(1e-7, 1.0 / k)),
-            "model__reg_lambda": uniform(0.0, max(0.01, 10.0 / k)),
+            "model__n_estimators": randint(50, 600),
+            "model__learning_rate": loguniform(0.005, 0.5),
+            "model__max_depth": randint(2, 24),
+            "model__min_child_weight": loguniform(0.1, 100.0),
+            "model__subsample": uniform(0.3, 0.7),  # [0.3, 1.0]
+            "model__colsample_bytree": uniform(0.3, 0.7),
+            "model__gamma": uniform(0.0, 5.0),
+            "model__reg_alpha": loguniform(1e-8, 100.0),
+            "model__reg_lambda": uniform(0.0, 200.0),
         }
 
     def build_pipeline(self, param):
