@@ -353,7 +353,7 @@ class KagglePipeline:
         controller, scoring_ctx, y, train = self._require_ready()
         assert self.runtime is not None
         runtime = self.runtime
-        return controller.run_batch(
+        summary = controller.run_batch(
             train_frame=train,
             scoring_ctx=cast(Any, scoring_ctx),
             y=y,
@@ -365,6 +365,36 @@ class KagglePipeline:
                 self._estimated_model_seconds()
             ),
         )
+        self._log_feature_generation(summary)
+        return summary
+
+    def _log_feature_generation(self, summary: BatchSummary) -> None:
+        """Report newly generated feature columns, scaled by verbosity.
+
+        SUMMARY+: a one-line count; DETAILED+: the new column names; DEBUG: the
+        names with their depth so deeper (costlier) compositions are visible.
+        """
+        names = summary.generated_feature_names
+        if not names:
+            return
+        self.log(f"features: +{len(names)} new ({summary.n_features_active} active)", level=Verbosity.SUMMARY)
+        self.log("  new feature columns: " + ", ".join(names), level=Verbosity.DETAILED)
+        if self.settings.verbosity >= Verbosity.DEBUG and self.controller is not None:
+            detail = []
+            for name in names:
+                feature = self._feature_by_name(name)
+                if feature is not None:
+                    detail.append(f"{name}(depth={feature.depth}, util={feature.utility:.3f})")
+            if detail:
+                self.log("  new feature detail: " + "; ".join(detail), level=Verbosity.DEBUG)
+
+    def _feature_by_name(self, human_name: str):
+        if self.controller is None:
+            return None
+        for feature in self.controller.registry.all_features():
+            if feature.human_name == human_name:
+                return feature
+        return None
 
     def _require_ready(self):
         """Return ``(controller, scoring_ctx, search_y, search_features)``.

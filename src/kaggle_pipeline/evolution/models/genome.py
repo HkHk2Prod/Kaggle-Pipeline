@@ -120,6 +120,25 @@ class ModelGenome:
                 return g
         return None
 
+    def gene_summary(self) -> list[str]:
+        """A readable list of this genome's *structural* genes, for printing.
+
+        Lists the base model, resource genes, and each feature reference (with its
+        encoding) -- i.e. what the model is made of. It deliberately omits the
+        hyperparameter (``ParameterGene``) values, which are tuning detail rather
+        than structure.
+        """
+
+        def fmt(value: Any) -> str:
+            return f"{value:.4g}" if isinstance(value, float) else str(value)
+
+        genes = [f"base={self.family}"]
+        genes.extend(f"{r.resource_name}={fmt(r.value)}" for r in self.resource_genes)
+        for fr in self.feature_reference_genes:
+            encoding = fr.encoding.value if fr.encoding is not None else None
+            genes.append(f"feat:{fr.feature_id}" + (f"/{encoding}" if encoding else ""))
+        return genes
+
     def validate(self) -> None:
         if not self.feature_reference_genes:
             raise ValueError(f"genome {self.model_id} has no feature references")

@@ -60,6 +60,10 @@ class KagglePipelineSettings:
     feature_candidates_per_batch: int | None = None
     feature_generation_ratio: float = 0.10
     max_active_features: int = 300
+    # Generated features may build on other generated features up to this depth;
+    # the extra depth/complexity is penalised in the feature-utility formula.
+    max_feature_depth: int = 2
+    allow_generated_feature_parents: bool = True
     cv_splits: int = 5
     # Cardinality cap above which a categorical is frequency-encoded rather than
     # one-hot (keeps materialized width bounded). Matches v1 onehot_max_cardinality.
@@ -105,6 +109,8 @@ class KagglePipelineSettings:
         return EvolutionSettings(
             max_active_features=self.max_active_features,
             feature_generation_ratio=self.feature_generation_ratio,
+            max_feature_depth=self.max_feature_depth,
+            allow_generated_feature_parents=self.allow_generated_feature_parents,
             mutation_scale=self.mutation_scale,
             mutation_drift=self.mutation_drift,
             preferred_num_mutated_genes_distribution=dict(

@@ -61,10 +61,12 @@ class EvolutionSettings:
     # --- Feature generation -------------------------------------------------
     # Candidates generated per batch = ceil(max_active_features * ratio).
     feature_generation_ratio: float = 0.10
-    # Depth/parentage rules. Initially generated features may only use original
-    # features as parents (depth 1); raise these to enable deeper composition.
-    max_feature_depth: int = 1
-    allow_generated_feature_parents: bool = False
+    # Depth/parentage rules. Generated features may compose on top of other
+    # generated features up to ``max_feature_depth``; deeper features are not
+    # forbidden but pay a cost -- their added depth/complexity feeds the complexity
+    # penalty in the feature-utility formula, so they must earn their keep.
+    max_feature_depth: int = 2
+    allow_generated_feature_parents: bool = True
     # A categorical with more distinct levels than this is never one-hot encoded
     # (it falls back to frequency encoding) so a single feature cannot explode into
     # a huge materialized width. Mirrors the v1 Config's ``onehot_max_cardinality``.

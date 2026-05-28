@@ -53,3 +53,20 @@ def test_generation_respects_active_cap(settings, registry, eval_context, synthe
     # Originals are protected; generated active count stays within the cap headroom.
     assert len(active) <= settings.effective_max_active_features(registry.n_original)
     assert any(g.score_set.has(REDUNDANCY) for g in active if not g.is_original) or True
+
+
+def test_deeper_generation_composes_on_generated_features(registry, settings, eval_context, synthetic):
+    # With allow_generated_feature_parents=True / max_feature_depth=2 (defaults),
+    # generated features can build on other generated features, reaching depth 2.
+    _, y = synthetic
+    assert settings.allow_generated_feature_parents and settings.max_feature_depth >= 2
+    gen = FeatureGenerator(registry, settings)
+    rng = np.random.default_rng(0)
+    for _ in range(6):
+        registry.advance_batch()
+        gen.generate_batch(rng, context=eval_context, y=y, n_candidates=15)
+        registry.rescore_active(context=eval_context, y=y)
+    depths = [g.depth for g in registry.get_active_features() if not g.is_original]
+    assert depths and max(depths) >= 2
+    # No feature exceeds the configured depth cap.
+    assert max(depths) <= settings.max_feature_depth
