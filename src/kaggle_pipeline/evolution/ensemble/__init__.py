@@ -10,6 +10,5 @@ exist, it falls back to the best single model.
 from __future__ import annotations
 
 from kaggle_pipeline.evolution.ensemble.manager import EnsembleManager, EnsembleResult
-from kaggle_pipeline.evolution.ensemble.submission import write_submission
 
-__all__ = ["EnsembleManager", "EnsembleResult", "write_submission"]
+__all__ = ["EnsembleManager", "EnsembleResult"]

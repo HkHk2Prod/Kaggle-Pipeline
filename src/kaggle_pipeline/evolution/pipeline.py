@@ -105,6 +105,7 @@ class KagglePipeline:
         self._search_y: np.ndarray | None = None
         self._test_features: pd.DataFrame | None = None
         self._test_ids: Any = None
+        self._test_has_ids: bool = False  # did the test set carry a real id column?
         self._sample: pd.DataFrame | None = None  # sample_submission template
         self._y: np.ndarray | None = None
         self._classes: np.ndarray | None = None
@@ -216,10 +217,9 @@ class KagglePipeline:
 
         if test_df is not None:
             test_eng = self._engineer(test_df, feature_expressions)
+            self._test_has_ids = id_col in test_eng.columns
             self._test_ids = (
-                test_eng[id_col].to_numpy()
-                if id_col in test_eng.columns
-                else np.arange(len(test_eng))
+                test_eng[id_col].to_numpy() if self._test_has_ids else np.arange(len(test_eng))
             )
             self._test_features = test_eng.drop(columns=[id_col], errors="ignore")
 
@@ -311,34 +311,56 @@ class KagglePipeline:
         """Run the batch loop under the runtime budget, then finalize."""
         if self.controller is None or self._scoring_ctx is None:
             raise RuntimeError("call fit() before run()")
+        # The submission reserve is gated by ``make_submission_on_run`` (0 = no
+        # reserve, no submission). The orchestrator updates it after every batch
+        # with a measured-time estimate -- this initial value is just the
+        # bootstrap default used before any per-model timings exist.
+        bootstrap_submission_reserve = (
+            self.settings.submission_time_reserve_seconds
+            if self.settings.make_submission_on_run
+            else 0.0
+        )
         self.runtime = RuntimeManager(
             max_runtime_seconds=self.settings.max_runtime_seconds,
             safety_margin_seconds=self.settings.safety_margin_seconds,
             checkpoint_time_reserve_seconds=self.settings.checkpoint_time_reserve_seconds,
             ensemble_time_reserve_seconds=self.settings.ensemble_time_reserve_seconds,
             finalization_time_reserve_seconds=self.settings.finalization_time_reserve_seconds,
+            submission_time_reserve_seconds=bootstrap_submission_reserve,
             enable_ensembling=self.settings.enable_ensembling,
         )
         self._last_checkpoint_time = time.monotonic()
         self.log("training started", level=Verbosity.NORMAL)
+        self._log_runtime_budget()
         try:
             while not self.runtime.should_stop_training():
                 # Always run at least one batch so a fresh run makes progress before
                 # any timing history exists; afterwards gate on the estimate.
                 first_batch = self.controller.registry.current_batch == 0
-                if not first_batch and not self.runtime.can_start_batch(
-                    self._estimated_batch_seconds()
-                ):
-                    self.log("stopping: not enough time for another batch", level=Verbosity.NORMAL)
+                batch_estimate = self._estimated_batch_seconds()
+                if not first_batch and not self.runtime.can_start_batch(batch_estimate):
+                    self.log(
+                        f"stopping: not enough time for another batch "
+                        f"(estimate={batch_estimate:.0f}s, "
+                        f"remaining_training={self.runtime.remaining_training_seconds():.0f}s)",
+                        level=Verbosity.NORMAL,
+                    )
                     break
+                self.log(
+                    f"batch start: estimate={batch_estimate:.0f}s, "
+                    f"remaining_training={self.runtime.remaining_training_seconds():.0f}s",
+                    level=Verbosity.DETAILED,
+                )
                 summary = self.run_batch()
                 self._last_batch = summary
                 self._record_history(summary)
+                self._refresh_submission_reserve()
                 if self.settings.checkpoint_every_batch:
                     self.checkpoint(reason="batch_complete")
                 self.print_state()
             self.checkpoint(reason="training_finished")
             self._finalize()
+            self._maybe_make_submission()
             self.checkpoint(reason="final")
         except KeyboardInterrupt:  # graceful: save what we have
             logger.warning("interrupted; checkpointing before exit")
@@ -377,7 +399,10 @@ class KagglePipeline:
         names = summary.generated_feature_names
         if not names:
             return
-        self.log(f"features: +{len(names)} new ({summary.n_features_active} active)", level=Verbosity.SUMMARY)
+        self.log(
+            f"features: +{len(names)} new ({summary.n_features_active} active)",
+            level=Verbosity.SUMMARY,
+        )
         self.log("  new feature columns: " + ", ".join(names), level=Verbosity.DETAILED)
         if self.settings.verbosity >= Verbosity.DEBUG and self.controller is not None:
             detail = []
@@ -417,10 +442,54 @@ class KagglePipeline:
             self.log("ensembling disabled; best single model is final", level=Verbosity.NORMAL)
             return
         if not self.runtime or not self.runtime.has_time_for_ensemble():
+            remaining = self.runtime.remaining_finalization_seconds() if self.runtime else 0.0
+            reserve = self.settings.finalization_time_reserve_seconds
             self.log(
-                "not enough time for ensembling; using best single model", level=Verbosity.SUMMARY
+                f"not enough time for ensembling; using best single model "
+                f"(remaining={remaining:.0f}s, finalization_reserve={reserve:.0f}s)",
+                level=Verbosity.SUMMARY,
             )
         self.ensemble()
+
+    def _maybe_make_submission(self) -> Path | None:
+        """Write ``submission.csv`` from inside ``run()`` when the flag is set.
+
+        Refits each ensemble member on the FULL train data, predicts test, and
+        writes the CSV. Skipped (with a log line) when the flag is off, when no
+        test data was passed to ``fit``, or when the run is already past the
+        reserved submission window. Errors are caught: a failed auto-submission
+        must not bring down a run whose checkpoint already exists.
+        """
+        if not self.settings.make_submission_on_run:
+            return None
+        if self._test_features is None:
+            self.log(
+                "make_submission_on_run set but no test data was given to fit(); skipping",
+                level=Verbosity.SUMMARY,
+            )
+            return None
+        if self.runtime is not None and not self.runtime.has_time_for_submission():
+            remaining = self.runtime.remaining_submission_seconds()
+            reserve = self.runtime.submission_time_reserve_seconds
+            self.log(
+                f"not enough time for submission within the reserved window; skipping "
+                f"(remaining={remaining:.0f}s, estimate={reserve:.0f}s)",
+                level=Verbosity.SUMMARY,
+            )
+            return None
+        try:
+            self.log(
+                f"writing submission (reserve={self.runtime.submission_time_reserve_seconds:.0f}s, "
+                f"remaining={self.runtime.remaining_submission_seconds():.0f}s)"
+                if self.runtime is not None
+                else "writing submission",
+                level=Verbosity.DETAILED,
+            )
+            return self.make_submission(self.settings.submission_path)
+        except Exception as exc:  # noqa: BLE001 - the checkpoint above is what matters
+            logger.exception("auto-submission failed: %s", exc)
+            self.log(f"auto-submission failed: {exc}", level=Verbosity.SUMMARY)
+            return None
 
     def ensemble(self) -> EnsembleResult:
         """Build the ensemble from the current population (OOF-based)."""
@@ -502,21 +571,53 @@ class KagglePipeline:
     def _submission_from_sample(
         self, sample: pd.DataFrame, predictions: np.ndarray
     ) -> pd.DataFrame:
-        """Build a submission matching the sample_submission's columns/structure."""
+        """Build a submission matching the sample_submission's columns/structure.
+
+        ``predictions`` are in test-row order (the order of ``self._test_ids``).
+        The sample submission is *not* guaranteed to share that order, so rows are
+        matched to the sample on the id column rather than by position -- aligning
+        by position silently scrambles every prediction whenever the two files are
+        sorted differently. The id sets are asserted equal first so a mismatch
+        fails loudly instead of yielding a submission full of nulls, and the
+        sample's column order is preserved. When the test set carried no id column
+        there is nothing to join on, so we fall back to positional alignment.
+        """
         columns = list(sample.columns)
         id_col = self._id_col if self._id_col in columns else columns[0]
         target_cols = [c for c in columns if c != id_col]
         proba = np.asarray(predictions, dtype=float)
 
-        frame = pd.DataFrame({id_col: self._test_ids})
+        # Tag the predictions with the test ids (same row order as ``proba``),
+        # coercing the ids back to the sample's dtype so the join matches.
+        preds = pd.DataFrame({id_col: np.asarray(self._test_ids)})
+        if self._test_has_ids:
+            preds[id_col] = preds[id_col].astype(sample[id_col].dtype)
         if len(target_cols) == 1:
-            frame[target_cols[0]] = self._decode_single(proba)
+            preds[target_cols[0]] = self._decode_single(proba)
         else:
             # One probability column per class (sample order assumed = class order).
             matrix = proba if proba.ndim == 2 else proba.reshape(-1, 1)
             for i, col in enumerate(target_cols):
-                frame[col] = matrix[:, i] if i < matrix.shape[1] else 0.0
-        return frame[columns]  # preserve the sample's column order
+                preds[col] = matrix[:, i] if i < matrix.shape[1] else 0.0
+
+        if not self._test_has_ids:
+            return preds[columns]  # no real ids to align on; keep test order
+
+        sample_ids = set(sample[id_col].tolist())
+        pred_ids = set(preds[id_col].tolist())
+        if sample_ids != pred_ids:
+            raise ValueError(
+                f"Test ids and sample-submission ids do not match on {id_col!r}: "
+                f"{len(pred_ids)} test id(s) vs {len(sample_ids)} sample id(s), "
+                f"{len(pred_ids & sample_ids)} in common. Cannot build a submission."
+            )
+        result = sample.drop(columns=target_cols).merge(preds, on=id_col, how="left")
+        if len(result) != len(sample):
+            raise ValueError(
+                f"Joining predictions on {id_col!r} changed the row count "
+                f"({len(sample)} -> {len(result)}); the id column is not unique."
+            )
+        return result[columns]  # preserve the sample's column order
 
     def _decode_single(self, proba: np.ndarray) -> np.ndarray:
         """Decode predictions into one submission column per ``prediction_aim``."""
@@ -672,6 +773,69 @@ class KagglePipeline:
         per_model = self._estimated_model_seconds()
         workers = max(1, self.scheduler.model_workers)
         return (self.settings.models_per_batch * per_model) / workers + 5.0
+
+    def _estimated_submission_seconds(self) -> float:
+        """Estimate make_submission cost from measured per-model search times.
+
+        Each ensemble member is refit on the FULL training data, so its refit
+        cost is roughly the median search-time per model scaled by
+        ``1 / search_sample_fraction`` (linear in row count for the trees and
+        gradient boosters we use). The submission step refits up to
+        ``ensemble_max_models`` members and predicts test. A 1.3x safety
+        multiplier over the median keeps the estimate conservative; CSV write
+        is microseconds and not worth modelling. Falls back to the bootstrap
+        default when there is no timing history yet.
+        """
+        times = self._completed_compute_times()
+        if not times:
+            return self.settings.submission_time_reserve_seconds
+        median_search = float(np.median(times))
+        scale_full = 1.0 / max(0.01, self.settings.search_sample_fraction)
+        per_refit = median_search * scale_full * 1.3
+        return per_refit * self.settings.ensemble_max_models
+
+    def _refresh_submission_reserve(self) -> None:
+        """Update the runtime's submission reserve from measured timings.
+
+        No-op when ``make_submission_on_run`` is False (the reserve stays at 0)
+        or when nothing has finished yet (the bootstrap default still applies).
+        Logs the new reserve at DETAILED so the user can see the estimate
+        tracking measured per-model times.
+        """
+        if not (self.runtime and self.settings.make_submission_on_run):
+            return
+        previous = self.runtime.submission_time_reserve_seconds
+        updated = self._estimated_submission_seconds()
+        self.runtime.submission_time_reserve_seconds = updated
+        # Only emit when the value actually changed -- repeating the same number
+        # every batch is noise.
+        if abs(updated - previous) > 1.0:
+            self.log(
+                f"submission reserve refined: {previous:.0f}s -> {updated:.0f}s "
+                f"(median model={float(np.median(self._completed_compute_times())):.2f}s, "
+                f"n_members={self.settings.ensemble_max_models}, "
+                f"scale_full={1.0 / max(0.01, self.settings.search_sample_fraction):.1f}x)",
+                level=Verbosity.DETAILED,
+            )
+
+    def _log_runtime_budget(self) -> None:
+        """Print the carved-up runtime budget at DETAILED+ so reserves are visible."""
+        if self.runtime is None or self.settings.verbosity < Verbosity.DETAILED:
+            return
+        total = self.settings.max_runtime_seconds
+        sub_reserve = self.runtime.submission_time_reserve_seconds
+        self.log(
+            f"runtime budget: total={total:.0f}s, "
+            f"safety={self.settings.safety_margin_seconds:.0f}s, "
+            f"checkpoint={self.settings.checkpoint_time_reserve_seconds:.0f}s, "
+            f"finalization={self.settings.finalization_time_reserve_seconds:.0f}s, "
+            f"ensemble={self.settings.ensemble_time_reserve_seconds:.0f}s"
+            f"{' (off)' if not self.settings.enable_ensembling else ''}, "
+            f"submission={sub_reserve:.0f}s"
+            f"{' (off)' if not self.settings.make_submission_on_run else ' (bootstrap)'}, "
+            f"training_window={self.runtime.remaining_training_seconds():.0f}s",
+            level=Verbosity.DETAILED,
+        )
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Shut the thread pools down gracefully."""

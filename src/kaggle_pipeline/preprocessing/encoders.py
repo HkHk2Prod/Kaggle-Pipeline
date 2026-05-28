@@ -1,48 +1,22 @@
 """Per-column categorical encoding for models that need numeric input.
 
 Some estimators handle categorical columns natively (CatBoost, XGBoost,
-LightGBM, HistGB) and are simply handed the raw column -- see each model's
-``handles_categoricals`` flag. The rest (RandomForest, LogisticRegression) need
-the categoricals turned into numbers first.
-
-This module decides *how* each categorical predictor is encoded for those
-models. The choice is per column and user-controlled via
-``Config.categorical_encoding``. A column left unspecified gets a
-cardinality-based default: low-cardinality columns (at most
-:data:`ONEHOT_MAX_CARDINALITY` distinct levels) one-hot encode without bloating
-the feature count, so they default to ``onehot``; anything wider falls back to
-:data:`DEFAULT_STRATEGY` (frequency encoding). :func:`resolve_encoding_plan`
-fills in the defaults and logs the per-column ``[encoding]`` plan at DEBUG (so it
-appears under ``verbosity='verbose'``), and :func:`categorical_transformer_specs`
-turns a resolved plan into ``ColumnTransformer`` entries.
+LightGBM, HistGB) and are simply handed the raw column. The rest
+(RandomForest, LogisticRegression) need the categoricals turned into numbers
+first. :func:`_make_encoder` builds the transformer implementing a single
+strategy; :class:`FrequencyEncoder` is the default fallback for high-cardinality
+columns.
 """
 
 from __future__ import annotations
-
-import logging
-from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
-logger = logging.getLogger(__name__)
-
-# Valid values for a ``Config.categorical_encoding`` entry.
-#   native    -- pass the raw column to the model (only honoured by models that
-#                handle categoricals natively; otherwise falls back to frequency).
-#   frequency -- replace each level with its training-set frequency.
-#   target    -- cross-fitted mean-target encoding (sklearn ``TargetEncoder``).
-#   onehot    -- one indicator column per level (unseen levels ignored).
-#   ordinal   -- arbitrary integer per level (unseen -> -1).
-#   drop      -- discard the column.
-ENCODING_STRATEGIES: frozenset[str] = frozenset(
-    {"native", "frequency", "target", "onehot", "ordinal", "drop"}
-)
-DEFAULT_STRATEGY = "frequency"
 # An unconfigured categorical with at most this many distinct levels defaults to
 # one-hot encoding (cheap and lossless at low cardinality); wider columns fall
-# back to DEFAULT_STRATEGY so one-hot can't explode the feature count.
+# back to frequency encoding so one-hot can't explode the feature count.
 ONEHOT_MAX_CARDINALITY = 20
 
 
@@ -75,93 +49,6 @@ class FrequencyEncoder(BaseEstimator, TransformerMixin):
         return np.asarray(self.feature_names_in_, dtype=object)
 
 
-def _default_strategy(train_df: pd.DataFrame, col: str, onehot_max_cardinality: int) -> str:
-    """Pick the default encoding for a categorical column not set by the user.
-
-    Columns with at most ``onehot_max_cardinality`` distinct levels one-hot
-    encode without inflating the feature count, so they default to ``onehot``;
-    wider columns (or any column missing from ``train_df``, whose cardinality we
-    can't measure) fall back to :data:`DEFAULT_STRATEGY`.
-    """
-    if col in train_df.columns and train_df[col].nunique() <= onehot_max_cardinality:
-        return "onehot"
-    return DEFAULT_STRATEGY
-
-
-def resolve_encoding_plan(
-    categorical_encoding: dict[str, str],
-    train_df: pd.DataFrame,
-    cat_cols_x: Sequence[str],
-    *,
-    onehot_max_cardinality: int | None = None,
-    announce: bool = True,
-) -> dict[str, str]:
-    """Return ``{column -> strategy}`` for every categorical predictor.
-
-    A column absent from ``categorical_encoding`` gets a cardinality-based
-    default (``onehot`` at or below ``onehot_max_cardinality`` levels, else
-    :data:`DEFAULT_STRATEGY`); ``onehot_max_cardinality=None`` falls back to
-    :data:`ONEHOT_MAX_CARDINALITY`. Configured columns that are not categorical
-    predictors are reported but ignored. When ``announce`` is set, logs one
-    ``[encoding]`` line per column (with its cardinality) plus a header making
-    the capability-wins rule explicit.
-    """
-    threshold = ONEHOT_MAX_CARDINALITY if onehot_max_cardinality is None else onehot_max_cardinality
-    cat_set = list(cat_cols_x)
-    plan = {
-        col: categorical_encoding[col]
-        if col in categorical_encoding
-        else _default_strategy(train_df, col, threshold)
-        for col in cat_set
-    }
-
-    if announce:
-        unknown_cols = sorted(set(categorical_encoding) - set(cat_set))
-        # The per-column plan is detail; log it at DEBUG (verbose) only.
-        logger.debug(
-            "[encoding] categorical encoding plan (used by models without native "
-            "categorical support, e.g. RandomForest / LogisticRegression; "
-            "native-capable models receive the raw column):"
-        )
-        for col in cat_set:
-            n_unique = train_df[col].nunique() if col in train_df.columns else "?"
-            default_note = "" if col in categorical_encoding else " (default)"
-            logger.debug(
-                "[encoding]   %s = %r%s  (%s unique)", col, plan[col], default_note, n_unique
-            )
-        for col in unknown_cols:
-            logger.debug(
-                "[encoding]   %r in categorical_encoding is not a categorical predictor; ignored.",
-                col,
-            )
-    return plan
-
-
-def categorical_transformer_specs(
-    plan: dict[str, str], columns: Sequence[str]
-) -> list[tuple[str, object, list[str]]]:
-    """Group ``columns`` by their encoding strategy into ColumnTransformer entries.
-
-    Returns a list of ``(name, transformer, columns)`` triples suitable for a
-    :class:`sklearn.compose.ColumnTransformer`. Only ``columns`` are considered
-    (so a caller can encode a subset, e.g. only the over-cap columns for HistGB).
-    A ``native`` strategy is treated as frequency here, because this path is only
-    taken by models that cannot consume a raw categorical column.
-    """
-    by_strategy: dict[str, list[str]] = {}
-    for col in columns:
-        strategy = plan.get(col, DEFAULT_STRATEGY)
-        # ``native`` is meaningless for a model that needs encoding; fall back.
-        if strategy == "native":
-            strategy = DEFAULT_STRATEGY
-        by_strategy.setdefault(strategy, []).append(col)
-
-    specs: list[tuple[str, object, list[str]]] = []
-    for strategy, cols in by_strategy.items():
-        specs.append((f"cat_{strategy}", _make_encoder(strategy), cols))
-    return specs
-
-
 def _make_encoder(strategy: str):
     """Build the transformer implementing a single encoding strategy."""
     if strategy == "frequency":
@@ -180,7 +67,4 @@ def _make_encoder(strategy: str):
         from sklearn.preprocessing import TargetEncoder
 
         return TargetEncoder()
-    raise ValueError(
-        f"Unknown categorical encoding strategy {strategy!r}; "
-        f"expected one of {sorted(ENCODING_STRATEGIES)}."
-    )
+    raise ValueError(f"Unknown categorical encoding strategy {strategy!r}.")

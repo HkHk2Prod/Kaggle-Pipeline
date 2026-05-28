@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -26,7 +26,14 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from kaggle_pipeline.evolution.features.materialization import GLOBAL_TRAIN, MaterializationContext
 from kaggle_pipeline.evolution.features.recipe import CATEGORICAL
 from kaggle_pipeline.evolution.features.registry import FeatureRegistry
-from kaggle_pipeline.evolution.genes.encoding_gene import COUNT, FREQUENCY, ONEHOT, TARGET
+from kaggle_pipeline.evolution.genes.encoding_gene import (
+    COUNT,
+    FREQUENCY,
+    NATIVE,
+    ONEHOT,
+    ORDINAL,
+    TARGET,
+)
 from kaggle_pipeline.evolution.models.genome import ModelGenome
 from kaggle_pipeline.evolution.models.lifecycle import FailureReason, ModelStatus
 from kaggle_pipeline.evolution.models.parameter_spaces import (
@@ -36,10 +43,8 @@ from kaggle_pipeline.evolution.models.parameter_spaces import (
 from kaggle_pipeline.evolution.models.scoring import ModelScoreSet
 from kaggle_pipeline.evolution.utils.arrays import is_missing
 from kaggle_pipeline.evolution.utils.logging import get_logger
+from kaggle_pipeline.preprocessing.encoders import ONEHOT_MAX_CARDINALITY, _make_encoder
 from kaggle_pipeline.search.cv import CrossValScore
-
-if TYPE_CHECKING:
-    from kaggle_pipeline.context import PipelineContext
 
 logger = get_logger(__name__)
 
@@ -132,7 +137,7 @@ class ModelTrainer:
         *,
         families: dict[str, FamilyDefinition] | None = None,
         context_id: str = GLOBAL_TRAIN,
-        onehot_max_cardinality: int = 20,
+        onehot_max_cardinality: int = ONEHOT_MAX_CARDINALITY,
     ):
         self.registry = registry
         self.families = families or build_default_families()
@@ -146,7 +151,7 @@ class ModelTrainer:
         train_frame: pd.DataFrame,
         y: np.ndarray,
         splits: list[tuple[np.ndarray, np.ndarray]],
-        ctx: PipelineContext,
+        ctx: Any,
         task: str = "classification",
         seed: int | None = None,
     ) -> ModelResult:
@@ -249,14 +254,19 @@ class ModelTrainer:
         for fr in genome.feature_reference_genes:
             feature = self.registry.get_feature(fr.feature_id)
             if feature.output_type == CATEGORICAL:
-                encoding = fr.encoding.value if fr.encoding is not None else FREQUENCY
-                # Never one-hot a high-cardinality column -- it would explode the
-                # materialized width; fall back to frequency (one column) instead.
-                if (
-                    encoding == ONEHOT
-                    and X[fr.feature_id].nunique(dropna=True) > self.onehot_max_cardinality
-                ):
-                    encoding = FREQUENCY
+                if fr.encoding is None:
+                    # No encoding gene -> a native-categorical family; feed it
+                    # integer codes (the encoding choice is not part of its genome).
+                    encoding = ORDINAL
+                else:
+                    encoding = fr.encoding.value
+                    # Defensive backstop: the factory already excludes one-hot for
+                    # high-cardinality features, but the train fold could differ.
+                    if (
+                        encoding == ONEHOT
+                        and X[fr.feature_id].nunique(dropna=True) > self.onehot_max_cardinality
+                    ):
+                        encoding = FREQUENCY
                 transformers.append(
                     (f"enc_{fr.feature_id}", self._encoder_for(encoding), [fr.feature_id])
                 )
@@ -280,16 +290,17 @@ class ModelTrainer:
 
     @staticmethod
     def _encoder_for(encoding: str) -> Any:
-        from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder
+        """Map an encoding-gene value to a transformer, reusing the v1 encoders.
 
-        if encoding == ONEHOT:
-            return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-        if encoding == FREQUENCY:
-            return _FrequencyEncoder()
+        ``onehot``/``ordinal``/``frequency`` delegate to the shared v1
+        :func:`~kaggle_pipeline.preprocessing.encoders._make_encoder` (identical
+        ``OneHotEncoder``/``OrdinalEncoder`` specs and ``FrequencyEncoder``); only
+        ``count`` has no v1 counterpart and keeps its local encoder.
+        """
         if encoding == COUNT:
             return _CountEncoder()
         if encoding == TARGET:
             # TODO: real out-of-fold target encoding; fall back to frequency for now.
-            return _FrequencyEncoder()
-        # native / ordinal: ordinal codes, unseen levels -> -1.
-        return OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+            encoding = FREQUENCY
+        # onehot / frequency, plus native -> ordinal (codes, unseen levels -> -1).
+        return _make_encoder(ORDINAL if encoding == NATIVE else encoding)

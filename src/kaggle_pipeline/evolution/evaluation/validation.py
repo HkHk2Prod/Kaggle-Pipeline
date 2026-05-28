@@ -19,12 +19,12 @@ def make_cv_splits(
     task: str = "classification",
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Return ``(train_idx, val_idx)`` folds; stratified for classification."""
-    from sklearn.model_selection import KFold, StratifiedKFold
+    from kaggle_pipeline.search.cv import make_cv_splitter
 
     n = len(y)
+    # Clamp to the row count so a tiny search subsample still yields valid folds.
     n_splits = max(2, min(n_splits, n))
+    splitter = make_cv_splitter(n_splits=n_splits, seed=seed, task=task)
     if task == "classification":
-        splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
         return list(splitter.split(np.zeros(n), y))
-    splitter = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
     return list(splitter.split(np.zeros(n)))

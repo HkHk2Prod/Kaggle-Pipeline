@@ -56,29 +56,6 @@ def split_num_cat(
     return num_cols, cat_cols
 
 
-def detect_ordinal_order_cols(
-    df: pd.DataFrame, order_lists: Sequence[Sequence[str]]
-) -> dict[str, list]:
-    """Map columns whose values match a known ordering to that natural order.
-
-    Matching is case-insensitive (e.g. "Low"/"low" both match ``["low", ...]``).
-    The returned values preserve the dataframe's original casing/representation.
-
-    Note: this is the correct, case-insensitive implementation from the
-    notebook. A later cell redefined it case-*sensitively* and silently shadowed
-    this one; that buggy redefinition is intentionally dropped.
-    """
-    result: dict[str, list] = {}
-    for col in df.columns:
-        vals = list(pd.unique(df[col].dropna()))
-        vals_map = {str(v).lower(): v for v in vals}
-        for order in order_lists:
-            if set(vals_map).issubset({o.lower() for o in order}):
-                result[col] = [vals_map[o.lower()] for o in order if o.lower() in vals_map]
-                break
-    return result
-
-
 def make_cat_order(cat_order_list: Sequence[str]) -> Callable[[object], int]:
     """Build a sort-key that orders categories by ``cat_order_list`` then length.
 

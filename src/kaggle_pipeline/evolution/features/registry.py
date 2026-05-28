@@ -22,7 +22,7 @@ from kaggle_pipeline.evolution.features.materialization import (
     FeatureMaterializer,
     MaterializationContext,
 )
-from kaggle_pipeline.evolution.features.recipe import NUMERIC
+from kaggle_pipeline.evolution.features.recipe import CATEGORICAL, NUMERIC
 from kaggle_pipeline.evolution.features.scoring import (
     GENERATION_COST,
     MISSINGNESS,
@@ -38,6 +38,7 @@ from kaggle_pipeline.evolution.features.transformations import (
     TransformationRegistry,
     build_default_registry,
 )
+from kaggle_pipeline.evolution.utils.arrays import missing_mask
 from kaggle_pipeline.evolution.utils.logging import get_logger
 from kaggle_pipeline.evolution.utils.random import (
     softmax_with_exploration,
@@ -205,6 +206,12 @@ class FeatureRegistry:
         if update_similarity and genome.output_type in (NUMERIC, "boolean"):
             redundancy = self.similarity.update_for_feature(feature_id, values)
             genome.score_set.set(REDUNDANCY, redundancy, higher_is_better=False)
+        elif genome.output_type == CATEGORICAL:
+            # Record distinct-value count so the model factory can constrain one-hot
+            # encoding at build time rather than only as a training-time fallback.
+            obj = np.asarray(values, dtype=object)
+            present = obj[~missing_mask(obj)]
+            genome.cardinality = int(np.unique(present.astype(str)).size)
 
     def score_tree_importance(
         self,

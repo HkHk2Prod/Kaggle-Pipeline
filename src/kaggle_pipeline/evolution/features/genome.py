@@ -148,6 +148,10 @@ class FeatureGenome:
     active: bool = True
     score_set: FeatureScoreSet = field(default_factory=FeatureScoreSet)
     usage_stats: FeatureUsageStats = field(default_factory=FeatureUsageStats)
+    # Distinct-value count on the evaluation sample (set when scoring categorical
+    # features); used to constrain one-hot encoding at model-build time. None until
+    # scored.
+    cardinality: int | None = field(default=None, compare=False)
     # Cached id (derived from the recipe); set in __post_init__.
     feature_id: str = field(default="", compare=False)
 
@@ -224,6 +228,7 @@ class FeatureGenome:
             "parent_genome_id": self.parent_genome_id,
             "depth": self.depth,
             "complexity": self.complexity,
+            "cardinality": self.cardinality,
             "score_set": self.score_set.to_serializable(),
             "usage_stats": self.usage_stats.to_serializable(),
             "metadata": dict(self.metadata),

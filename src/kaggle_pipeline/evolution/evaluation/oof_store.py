@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from kaggle_pipeline.evolution.utils.arrays import abs_correlation, standardize_for_correlation
+
 
 class OOFStore:
     """Keeps OOF prediction matrices keyed by model id."""
@@ -32,16 +34,19 @@ class OOFStore:
         self._oof.pop(model_id, None)
 
     def behavior_delta(self, parent_id: str, child_id: str) -> float | None:
-        """``1 - |corr|`` of the two OOF matrices, or ``None`` if unavailable."""
+        """``1 - |corr|`` of the two OOF matrices, or ``None`` if unavailable.
+
+        ``None`` covers a missing model, mismatched shapes and a (near-)constant
+        OOF -- all surfaced by the shared standardize/correlate helpers.
+        """
         a, b = self._oof.get(parent_id), self._oof.get(child_id)
         if a is None or b is None:
             return None
-        fa, fb = a.ravel(), b.ravel()
-        if fa.shape != fb.shape or fa.size < 2:
+        za = standardize_for_correlation(a)
+        zb = standardize_for_correlation(b)
+        if za is None or zb is None:
             return None
-        if np.std(fa) < 1e-12 or np.std(fb) < 1e-12:
+        corr = abs_correlation(za, zb)
+        if corr is None:
             return None
-        corr = float(np.corrcoef(fa, fb)[0, 1])
-        if not np.isfinite(corr):
-            return None
-        return float(np.clip(1.0 - abs(corr), 0.0, 1.0))
+        return float(np.clip(1.0 - corr, 0.0, 1.0))
