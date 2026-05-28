@@ -27,6 +27,7 @@ from kaggle_pipeline.evolution.features.recipe import (
     FeatureRecipe,
 )
 from kaggle_pipeline.evolution.storage.hashing import short_hash
+from kaggle_pipeline.evolution.utils.arrays import missing_mask
 
 if TYPE_CHECKING:
     from kaggle_pipeline.evolution.features.genome import FeatureGenome
@@ -111,7 +112,7 @@ class FeatureTransformation(ABC):
             if finite.size == 0 or np.unique(finite).size < 2:
                 raise TransformError("constant", "constant / near-constant output")
         else:  # categorical
-            missing = np.array([v is None or (isinstance(v, float) and np.isnan(v)) for v in arr])
+            missing = missing_mask(arr)
             if float(missing.mean()) > self.max_nan_fraction:
                 raise TransformError("too_many_nan", "too many missing categories")
             if np.unique(arr[~missing]).size < 2:

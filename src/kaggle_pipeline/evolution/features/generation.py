@@ -33,7 +33,7 @@ from kaggle_pipeline.evolution.features.transformations import (
     TransformError,
 )
 from kaggle_pipeline.evolution.utils.logging import get_logger
-from kaggle_pipeline.evolution.utils.random import spawn_rng
+from kaggle_pipeline.evolution.utils.random import spawn_rng, weighted_choice
 
 logger = get_logger(__name__)
 
@@ -184,11 +184,8 @@ class FeatureGenerator:
         if len(pool) < transform.arity:
             return None
         probs = self.registry.compute_selection_probabilities(pool)
-        ids = list(probs)
-        p = np.array([probs[i] for i in ids])
-        p = p / p.sum()
-        chosen = rng.choice(len(ids), size=transform.arity, replace=False, p=p)
-        return [self.registry.get_feature(ids[i]) for i in chosen]
+        chosen = weighted_choice(rng, probs, transform.arity)
+        return [self.registry.get_feature(fid) for fid in chosen]
 
     # --- batch --------------------------------------------------------------
     def generate_batch(

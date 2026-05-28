@@ -20,13 +20,6 @@ from kaggle_pipeline.evolution.features.genome import FeatureGenome
 from kaggle_pipeline.evolution.features.scoring import GENERATION_COST, REDUNDANCY
 
 
-def _normalized(genome: FeatureGenome, name: str) -> float:
-    score = genome.score_set.get(name)
-    if score is None:
-        return 0.0
-    return score.normalized_value if score.normalized_value is not None else score.value
-
-
 @dataclass
 class DeletionPolicy:
     """Scores removable features; the lowest score is evicted first."""
@@ -42,8 +35,8 @@ class DeletionPolicy:
             genome.score_set.utility
             + self.active_usage_weight * usage.times_in_completed_model
             + self.elite_usage_weight * usage.times_in_elite_model
-            - self.redundancy_weight * _normalized(genome, REDUNDANCY)
-            - self.cost_weight * _normalized(genome, GENERATION_COST)
+            - self.redundancy_weight * genome.score_set.normalized(REDUNDANCY)
+            - self.cost_weight * genome.score_set.normalized(GENERATION_COST)
         )
 
     def weakest(self, features: list[FeatureGenome]) -> FeatureGenome | None:

@@ -34,6 +34,7 @@ from kaggle_pipeline.evolution.models.parameter_spaces import (
     build_default_families,
 )
 from kaggle_pipeline.evolution.models.scoring import ModelScoreSet
+from kaggle_pipeline.evolution.utils.arrays import is_missing
 from kaggle_pipeline.evolution.utils.logging import get_logger
 from kaggle_pipeline.search.cv import CrossValScore
 
@@ -41,6 +42,9 @@ if TYPE_CHECKING:
     from kaggle_pipeline.context import PipelineContext
 
 logger = get_logger(__name__)
+
+# Sentinel level for a missing categorical value, so encoders stay null-safe.
+_NA_CATEGORY = "__nan__"
 
 
 @dataclass
@@ -202,7 +206,15 @@ class ModelTrainer:
         context = MaterializationContext(frame=frame, context_id=context_id or self.context_id)
         data: dict[str, np.ndarray] = {}
         for fr in genome.feature_reference_genes:
-            data[fr.feature_id] = self.registry.materialize(fr.feature_id, context)
+            values = self.registry.materialize(fr.feature_id, context)
+            feature = self.registry.get_feature(fr.feature_id)
+            if feature.output_type == CATEGORICAL:
+                # Make any encoder null-safe: a missing category becomes its own
+                # level. Numeric NaNs are handled downstream by the imputer.
+                values = np.array(
+                    [_NA_CATEGORY if is_missing(v) else v for v in values], dtype=object
+                )
+            data[fr.feature_id] = values
         return pd.DataFrame(data, index=frame.index)
 
     # --- pipeline -----------------------------------------------------------

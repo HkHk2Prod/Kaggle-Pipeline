@@ -14,6 +14,7 @@ import numpy as np
 
 from kaggle_pipeline.evolution.features.materialization import hash_values
 from kaggle_pipeline.evolution.features.recipe import NUMERIC
+from kaggle_pipeline.evolution.utils.arrays import missing_mask
 
 
 @dataclass
@@ -67,8 +68,8 @@ def compute_fingerprint(
         )
 
     obj = np.asarray(arr, dtype=object)
-    is_missing = np.array([v is None or (isinstance(v, float) and np.isnan(v)) for v in obj])
-    present = obj[~is_missing].astype(str)
+    mask = missing_mask(obj)
+    present = obj[~mask].astype(str)
     values_u, counts = (
         np.unique(present, return_counts=True) if present.size else (np.array([]), np.array([]))
     )
@@ -78,7 +79,7 @@ def compute_fingerprint(
         recipe_hash=recipe_hash,
         value_hash_on_sample=hash_values(arr),
         output_type=output_type,
-        missing_rate=float(is_missing.mean()) if obj.size else 1.0,
+        missing_rate=float(mask.mean()) if obj.size else 1.0,
         n_rows=n,
         cardinality=int(values_u.size),
         top_categories=[str(values_u[i]) for i in order],

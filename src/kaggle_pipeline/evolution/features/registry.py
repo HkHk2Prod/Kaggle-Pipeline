@@ -39,7 +39,11 @@ from kaggle_pipeline.evolution.features.transformations import (
     build_default_registry,
 )
 from kaggle_pipeline.evolution.utils.logging import get_logger
-from kaggle_pipeline.evolution.utils.random import softmax_with_exploration, spawn_rng
+from kaggle_pipeline.evolution.utils.random import (
+    softmax_with_exploration,
+    spawn_rng,
+    weighted_choice,
+)
 
 logger = get_logger(__name__)
 
@@ -298,12 +302,7 @@ class FeatureRegistry:
         if not candidates:
             return []
         probs = self.compute_selection_probabilities(candidates)
-        ids = list(probs)
-        p = np.array([probs[i] for i in ids])
-        p = p / p.sum()
-        k = min(n, len(ids))
-        chosen = rng.choice(len(ids), size=k, replace=False, p=p)
-        return [ids[i] for i in chosen]
+        return weighted_choice(rng, probs, n)
 
     def get_candidate_parents(self, *, output_type: str | None = None) -> list[FeatureGenome]:
         """Features eligible as parents for generation under the current depth rules."""

@@ -119,6 +119,62 @@ def test_autodetect_feature_expressions_and_subsample(tmp_path):
         pipeline.shutdown()
 
 
+def test_submission_matches_sample_columns(tmp_path):
+    warnings.simplefilter("ignore")
+    train, test = _data()
+    # A competition-style sample_submission with a non-"target" target column name.
+    sample = pd.DataFrame({"id": test["id"].to_numpy(), "Survived": 0})
+    pipeline = _fast_pipeline(tmp_path)
+    try:
+        pipeline.fit(train, target="target", test_df=test, sample_df=sample, id_col="id")
+        out = pipeline.make_submission(tmp_path / "submission.csv")
+        written = pd.read_csv(out)
+        assert list(written.columns) == ["id", "Survived"]  # matches the sample, not "target"
+        assert len(written) == len(test)
+        assert written["Survived"].between(0.0, 1.0).all()  # probability aim
+    finally:
+        pipeline.shutdown()
+
+
+def test_submission_category_aim_writes_labels(tmp_path):
+    warnings.simplefilter("ignore")
+    train, test = _data()
+    sample = pd.DataFrame({"id": test["id"].to_numpy(), "label": 0})
+    pipeline = _fast_pipeline(tmp_path)
+    try:
+        pipeline.fit(
+            train,
+            target="target",
+            test_df=test,
+            sample_df=sample,
+            prediction_aim="category",
+            id_col="id",
+        )
+        written = pd.read_csv(pipeline.make_submission(tmp_path / "submission.csv"))
+        assert set(written["label"].unique()).issubset({0, 1})  # decoded class labels
+    finally:
+        pipeline.shutdown()
+
+
+def test_pipeline_tolerates_nulls(tmp_path):
+    warnings.simplefilter("ignore")
+    train, test = _data(n=260)
+    rng = np.random.default_rng(0)
+    for frame in (train, test):
+        frame.loc[rng.choice(len(frame), 20, replace=False), "num1"] = np.nan
+        frame.loc[rng.choice(len(frame), 20, replace=False), "cat1"] = None
+    pipeline = _fast_pipeline(tmp_path)
+    try:
+        # No load_datasets gate here; the pipeline imputes numerics and treats the
+        # missing category as its own level, so training completes despite nulls.
+        pipeline.fit(train, target="target", test_df=test, id_col="id")
+        assert pipeline.summarize_state()["models"]["completed"] > 0
+        preds = pipeline.predict()
+        assert np.all(np.isfinite(preds))
+    finally:
+        pipeline.shutdown()
+
+
 def test_silent_verbosity_prints_nothing(tmp_path):
     # format_summary at level 0 yields nothing; print_state must be a no-op.
     assert (

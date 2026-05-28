@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from kaggle_pipeline.evolution.utils.arrays import missing_mask
+
 if TYPE_CHECKING:
     from kaggle_pipeline.evolution.config import EvolutionSettings
     from kaggle_pipeline.evolution.features.genome import FeatureGenome
@@ -107,6 +109,13 @@ class FeatureScoreSet:
     def value(self, name: str, default: float = 0.0) -> float:
         score = self.scores.get(name)
         return score.value if score is not None else default
+
+    def normalized(self, name: str, default: float = 0.0) -> float:
+        """A score's normalized value when set, else its raw value, else ``default``."""
+        score = self.scores.get(name)
+        if score is None:
+            return default
+        return score.normalized_value if score.normalized_value is not None else score.value
 
     def has(self, name: str) -> bool:
         return name in self.scores
@@ -247,8 +256,7 @@ class FeatureScorer:
         if raw.size == 0:
             return 1.0
         if raw.dtype == object:
-            missing = [v is None or (isinstance(v, float) and np.isnan(v)) for v in raw.ravel()]
-            return float(np.mean(missing))
+            return float(missing_mask(raw).mean())
         return float((~np.isfinite(raw.astype(float).ravel())).mean())
 
     def tree_importances(
@@ -322,14 +330,14 @@ class FeatureUtility:
     def intrinsic(self, genome: FeatureGenome) -> float:
         w = self.settings.feature_scoring_weights
         s = genome.score_set
-        # Each score's normalized_value is preferred when present (set by the
-        # registry's normalization pass); otherwise fall back to the raw value.
+        # normalized() prefers a score's normalized_value (set by the registry's
+        # normalization pass), falling back to the raw value, else 0.
         return (
-            w.target_correlation * self._n(s, TARGET_CORRELATION)
-            + w.tree_importance * self._n(s, TREE_IMPORTANCE)
-            - w.redundancy * self._n(s, REDUNDANCY)
+            w.target_correlation * s.normalized(TARGET_CORRELATION)
+            + w.tree_importance * s.normalized(TREE_IMPORTANCE)
+            - w.redundancy * s.normalized(REDUNDANCY)
             - w.complexity * self._normalized_complexity(genome)
-            - w.cost * self._n(s, GENERATION_COST)
+            - w.cost * s.normalized(GENERATION_COST)
         )
 
     def downstream(self, genome: FeatureGenome) -> float:
@@ -357,13 +365,6 @@ class FeatureUtility:
         genome.score_set.utility = float(utility)
         genome.score_set.set(FINAL_UTILITY, utility)
         return float(utility)
-
-    @staticmethod
-    def _n(score_set: FeatureScoreSet, name: str) -> float:
-        score = score_set.get(name)
-        if score is None:
-            return 0.0
-        return score.normalized_value if score.normalized_value is not None else score.value
 
     @staticmethod
     def _normalized_complexity(genome: FeatureGenome) -> float:

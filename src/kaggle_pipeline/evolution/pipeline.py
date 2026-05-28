@@ -33,7 +33,6 @@ from kaggle_pipeline.evolution.ecosystem.serialization import EcosystemSerialize
 from kaggle_pipeline.evolution.ecosystem.state import EcosystemState
 from kaggle_pipeline.evolution.ecosystem.summary import build_ecosystem_summary, format_summary
 from kaggle_pipeline.evolution.ensemble.manager import EnsembleManager, EnsembleResult
-from kaggle_pipeline.evolution.ensemble.submission import write_submission
 from kaggle_pipeline.evolution.features.recipe import CATEGORICAL, NUMERIC
 from kaggle_pipeline.evolution.logging_utils import Verbosity, configure_logging
 from kaggle_pipeline.evolution.models.parameter_spaces import build_default_families
@@ -106,9 +105,11 @@ class KagglePipeline:
         self._search_y: np.ndarray | None = None
         self._test_features: pd.DataFrame | None = None
         self._test_ids: Any = None
+        self._sample: pd.DataFrame | None = None  # sample_submission template
         self._y: np.ndarray | None = None
         self._classes: np.ndarray | None = None
         self._task = "classification"
+        self._prediction_aim = "probability"
         self._scoring_ctx: _ScoringContext | None = None
         self._id_col = "id"
 
@@ -136,24 +137,31 @@ class KagglePipeline:
         *,
         task: str | None = None,
         scoring: str | None = None,
+        prediction_aim: str | None = None,
         id_col: str = "id",
+        sample_df: pd.DataFrame | None = None,
         feature_expressions: list[str] | None = None,
         feature_types: dict[str, str] | None = None,
         resume: bool = False,
     ) -> KagglePipeline:
         """Prepare data + ecosystem, then run the full pipeline (returns self).
 
-        ``target``/``task``/``scoring`` left as ``None`` are autodetected from the
-        data using the v1 resolver (same rules as ``kaggle_pipeline.run``).
-        ``feature_expressions`` are ``df.eval`` strings that add engineered columns
-        (no v1 categorical *encodings* are applied -- encoding is model-specific).
+        ``target``/``task``/``scoring``/``prediction_aim`` left as ``None`` are
+        autodetected from the data using the v1 resolver (same rules as
+        ``kaggle_pipeline.run``). ``sample_df`` is the competition's
+        ``sample_submission`` -- when given, the written submission matches its
+        column names and structure. ``feature_expressions`` are ``df.eval`` strings
+        that add engineered columns (no v1 categorical *encodings* are applied --
+        encoding is model-specific).
         """
+        self._sample = sample_df
         self._prepare(
             train_df,
             target,
             test_df,
             task=task,
             scoring=scoring,
+            prediction_aim=prediction_aim,
             id_col=id_col,
             feature_expressions=feature_expressions,
             feature_types=feature_types,
@@ -170,15 +178,19 @@ class KagglePipeline:
         *,
         task,
         scoring,
+        prediction_aim,
         id_col,
         feature_expressions,
         feature_types,
         resume,
     ) -> None:
         self._id_col = id_col
-        # 1) Autodetect target/task/scoring on the RAW frame (before engineering, so
-        #    the "last non-id column" target heuristic is not fooled by new columns).
-        target, task, scoring = self._autodetect(train_df, target, task, scoring, id_col)
+        # 1) Autodetect target/task/scoring/prediction_aim on the RAW frame (before
+        #    engineering, so the "last non-id column" target heuristic is not fooled
+        #    by new columns).
+        target, task, scoring, self._prediction_aim = self._autodetect(
+            train_df, target, task, scoring, prediction_aim, id_col
+        )
         self._task = task
 
         # 2) Feature engineering: df.eval expressions add columns; no encodings.
@@ -237,18 +249,20 @@ class KagglePipeline:
             level=Verbosity.NORMAL,
         )
 
-    def _autodetect(self, train_df, target, task, scoring, id_col):
-        """Fill target/task/scoring left as None, reusing the v1 autodetect rules."""
-        if target is not None and task is not None and scoring is not None:
-            return target, task, scoring
+    def _autodetect(self, train_df, target, task, scoring, prediction_aim, id_col):
+        """Fill target/task/scoring/prediction_aim left as None (v1 autodetect rules)."""
         from kaggle_pipeline.config import Config
         from kaggle_pipeline.data.autodetect import resolve_problem_definition
 
         cfg = Config(
-            target=[target] if target else None, id_col=[id_col], task=task, scoring=scoring
+            target=[target] if target else None,
+            id_col=[id_col],
+            task=task,
+            scoring=scoring,
+            prediction_aim=prediction_aim,
         )
         resolve_problem_definition(cfg, train_df)
-        return cfg.target[0], cfg.task, cfg.scoring
+        return cfg.target[0], cfg.task, cfg.scoring, cfg.prediction_aim
 
     def _engineer(self, df: pd.DataFrame, feature_expressions: list[str] | None) -> pd.DataFrame:
         """Apply ``df.eval`` feature expressions (no encodings)."""
@@ -427,31 +441,69 @@ class KagglePipeline:
         )
 
     def make_submission(
-        self, path: str | Path = "submission.csv", *, target_col: str = "target"
+        self,
+        path: str | Path = "submission.csv",
+        *,
+        sample_df: pd.DataFrame | None = None,
+        target_col: str = "target",
     ) -> Path:
-        """Predict and write a submission CSV (positive-class prob / arg-max label)."""
+        """Predict and write a submission CSV.
+
+        When a ``sample_submission`` is available (``sample_df`` or the one passed
+        to ``fit``), the output matches its column names and structure and the
+        target is decoded per ``prediction_aim`` (positive-class probability,
+        per-class probability columns, or arg-max label). Otherwise it falls back to
+        an ``id,target`` file.
+        """
         predictions = self.predict()
-        classes = self._classes
-        task = self._task
-
-        def decode(preds: np.ndarray) -> np.ndarray:
-            arr = np.asarray(preds)
-            if task != "classification" or classes is None:
-                return arr.ravel()
-            if arr.ndim == 2 and arr.shape[1] == 2:
-                return arr[:, 1]  # positive-class probability
-            return classes[arr.argmax(axis=1)]
-
-        out = write_submission(
-            path,
-            ids=self._test_ids,
-            predictions=predictions,
-            id_col=self._id_col,
-            target_col=target_col,
-            decode=decode,
+        sample = sample_df if sample_df is not None else self._sample
+        if sample is not None:
+            frame = self._submission_from_sample(sample, predictions)
+        else:
+            frame = self._submission_fallback(predictions, target_col)
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        frame.to_csv(out, index=False)
+        self.log(
+            f"submission written to {out} (columns {list(frame.columns)})", level=Verbosity.NORMAL
         )
-        self.log(f"submission written to {out}", level=Verbosity.NORMAL)
         return out
+
+    def _submission_from_sample(
+        self, sample: pd.DataFrame, predictions: np.ndarray
+    ) -> pd.DataFrame:
+        """Build a submission matching the sample_submission's columns/structure."""
+        columns = list(sample.columns)
+        id_col = self._id_col if self._id_col in columns else columns[0]
+        target_cols = [c for c in columns if c != id_col]
+        proba = np.asarray(predictions, dtype=float)
+
+        frame = pd.DataFrame({id_col: self._test_ids})
+        if len(target_cols) == 1:
+            frame[target_cols[0]] = self._decode_single(proba)
+        else:
+            # One probability column per class (sample order assumed = class order).
+            matrix = proba if proba.ndim == 2 else proba.reshape(-1, 1)
+            for i, col in enumerate(target_cols):
+                frame[col] = matrix[:, i] if i < matrix.shape[1] else 0.0
+        return frame[columns]  # preserve the sample's column order
+
+    def _decode_single(self, proba: np.ndarray) -> np.ndarray:
+        """Decode predictions into one submission column per ``prediction_aim``."""
+        if self._task != "classification" or self._classes is None:
+            return proba.ravel()
+        if self._prediction_aim == "category":
+            return self._classes[proba.argmax(axis=1)] if proba.ndim == 2 else proba.ravel()
+        # probability
+        if proba.ndim == 2 and proba.shape[1] == 2:
+            return proba[:, 1]  # positive class
+        if proba.ndim == 2:
+            return self._classes[proba.argmax(axis=1)]  # multiclass single-col: best-effort label
+        return proba.ravel()
+
+    def _submission_fallback(self, predictions: np.ndarray, target_col: str) -> pd.DataFrame:
+        decoded = self._decode_single(np.asarray(predictions, dtype=float))
+        return pd.DataFrame({self._id_col: self._test_ids, target_col: np.asarray(decoded).ravel()})
 
     # --- state --------------------------------------------------------------
     def summarize_state(self) -> dict[str, Any]:

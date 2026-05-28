@@ -41,6 +41,31 @@ def stochastic_round(value: float, rng: np.random.Generator) -> int:
     return int(floor) + int(rng.random() < frac)
 
 
+def weighted_choice(
+    rng: np.random.Generator | None,
+    probabilities: dict[str, float],
+    k: int = 1,
+    *,
+    replace: bool = False,
+) -> list[str]:
+    """Sample up to ``k`` keys from a ``{key: probability}`` mapping.
+
+    Probabilities are renormalised (uniform if they sum to zero). Without
+    replacement, at most ``len(probabilities)`` keys are returned. Returns ``[]``
+    for an empty mapping.
+    """
+    keys = list(probabilities)
+    if not keys:
+        return []
+    rng = spawn_rng(rng)
+    p = np.asarray([probabilities[key] for key in keys], dtype=float)
+    total = p.sum()
+    p = p / total if total > 0 else np.full(len(keys), 1.0 / len(keys))
+    size = k if replace else min(k, len(keys))
+    chosen = rng.choice(len(keys), size=size, replace=replace, p=p)
+    return [keys[int(i)] for i in np.atleast_1d(chosen)]
+
+
 def softmax_with_exploration(
     utilities: np.ndarray,
     *,
