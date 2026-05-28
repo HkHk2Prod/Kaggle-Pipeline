@@ -15,6 +15,7 @@ leakage-safe; target encoding remains a TODO (it needs the OOF path).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, cast
@@ -50,6 +51,13 @@ logger = get_logger(__name__)
 
 # Sentinel level for a missing categorical value, so encoders stay null-safe.
 _NA_CATEGORY = "__nan__"
+
+# LightGBM rejects feature names containing these JSON-special characters (it
+# serialises the booster to JSON). Our feature ids use "::" and one-hot
+# encoders emit "<col>_<category>" -- category values may contain ":" too --
+# so the names arriving at the model can trip its check. The sanitiser below
+# rewrites them right before the model step.
+_LGBM_FORBIDDEN_NAME_CHARS = re.compile(r"[,\[\]:{}\"\\]")
 
 
 @dataclass
@@ -102,6 +110,24 @@ class _CountEncoder(BaseEstimator, TransformerMixin):
         if input_features is not None:
             return np.asarray(input_features, dtype=object)
         return self.feature_names_in_
+
+
+class _SanitizeFeatureNames(BaseEstimator, TransformerMixin):
+    """Replace LightGBM-forbidden JSON characters in DataFrame column names.
+
+    No-op on non-DataFrame input (estimators that get a numpy array don't see
+    feature names anyway).
+    """
+
+    def fit(self, X: Any, y: Any = None) -> _SanitizeFeatureNames:
+        return self
+
+    def transform(self, X: Any) -> Any:
+        if hasattr(X, "rename"):
+            return X.rename(
+                columns=lambda c: _LGBM_FORBIDDEN_NAME_CHARS.sub("_", str(c))
+            )
+        return X
 
 
 class _GenomeModel:
@@ -285,6 +311,7 @@ class ModelTrainer:
         steps: list[tuple[str, Any]] = [("prep", preprocessor)]
         if fam.needs_scaling:
             steps.append(("scaler", StandardScaler()))
+        steps.append(("sanitize", _SanitizeFeatureNames()))
         steps.append(("model", estimator))
         return Pipeline(steps)
 
