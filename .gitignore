@@ -37,3 +37,6 @@ submission*.csv
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Claude Code harness state (per-machine; not project code)
+.claude/
