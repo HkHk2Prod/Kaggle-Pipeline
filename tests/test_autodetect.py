@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from kaggle_pipeline import Config, build_pipeline
+from kaggle_pipeline import Config
 from kaggle_pipeline.config import environment as envmod
 from kaggle_pipeline.config.environment import autodetect_data_dir, resolve_paths
 from kaggle_pipeline.data.autodetect import (
@@ -139,23 +139,19 @@ def test_resolve_paths_kaggle_autodetects_data_dir(tmp_path: Path, monkeypatch):
     assert paths.storage_dir == tmp_path / "models"
 
 
-def test_build_pipeline_with_full_autodetect(synthetic_data_dir: Path, tmp_path: Path):
-    """A sparse config (only paths) builds the same context as an explicit one."""
+def test_autodetect_through_data_pipeline(synthetic_data_dir: Path, tmp_path: Path):
+    """A sparse Config + data load triggers full autodetect of problem definition."""
+    from kaggle_pipeline.data import load_datasets
+
     cfg = Config(
         competition="synthetic",
-        n_steps=1,
-        num_models=4,
-        step_batch_size=2,
-        n_workers=1,
         data_dir=synthetic_data_dir,
         storage_dir=tmp_path / "models",
     )
-    ctx, _ = build_pipeline(cfg)
-    # Autodetection mutated the config in place.
+    resolve_paths(cfg, env="local")
+    load_datasets(cfg, synthetic_data_dir, check_nulls=False)
     assert cfg.target == ["y"]
     assert cfg.task == "classification"
     assert cfg.prediction_aim == "probability"
     assert cfg.scoring == "roc_auc"
     assert cfg.train_csv == "train.csv"
-    assert ctx.target_is_num is False
-    assert ctx.target_width == 2

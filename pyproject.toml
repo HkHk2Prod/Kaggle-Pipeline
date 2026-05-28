@@ -44,9 +44,6 @@ dev = [
 Homepage = "https://github.com/HkHk2Prod/Kaggle-Pipeline"
 Repository = "https://github.com/HkHk2Prod/Kaggle-Pipeline"
 
-[project.scripts]
-kaggle-pipeline = "kaggle_pipeline.cli:main"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 

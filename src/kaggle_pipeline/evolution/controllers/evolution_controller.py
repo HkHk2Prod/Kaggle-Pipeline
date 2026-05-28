@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -46,9 +46,6 @@ from kaggle_pipeline.evolution.models.registry import ModelPopulation
 from kaggle_pipeline.evolution.models.training import ModelTrainer
 from kaggle_pipeline.evolution.utils.logging import get_logger
 from kaggle_pipeline.evolution.utils.random import spawn_rng
-
-if TYPE_CHECKING:
-    from kaggle_pipeline.context import PipelineContext
 
 logger = get_logger(__name__)
 
@@ -141,7 +138,7 @@ class EvolutionController:
         self,
         *,
         train_frame: pd.DataFrame,
-        scoring_ctx: PipelineContext,
+        scoring_ctx: Any,
         y: np.ndarray,
         n_models: int = 8,
         task: str | None = None,

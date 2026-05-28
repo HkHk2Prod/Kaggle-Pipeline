@@ -7,21 +7,16 @@ trained on.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from kaggle_pipeline.context import PipelineContext
-    from kaggle_pipeline.models.base import Model
-
 
 def make_cv_splitter(*, n_splits: int, seed: int | None, task: str = "classification"):
-    """Build the CV splitter shared by the v1 search and the evolutionary trainer.
+    """Build the CV splitter used by the evolutionary trainer.
 
     Classification stratifies on the target; regression uses a plain K-fold. Both
-    shuffle with the run ``seed`` so folds are reproducible -- and identical across
-    the two layers, which is what keeps their reported scores comparable.
+    shuffle with the run ``seed`` so folds are reproducible.
     """
     from sklearn.model_selection import KFold, StratifiedKFold
 
@@ -33,7 +28,7 @@ def make_cv_splitter(*, n_splits: int, seed: int | None, task: str = "classifica
 class CrossValScore:
     """Fit/score ``model`` across ``splits`` and attach OOF preds to the model."""
 
-    def __init__(self, model: Model, X, y, *, splits, ctx: PipelineContext):
+    def __init__(self, model: Any, X, y, *, splits, ctx: Any):
         scores: list[float] = []
         y_oof = np.zeros((len(y), ctx.target_width))
         for train_idx, val_idx in splits:
