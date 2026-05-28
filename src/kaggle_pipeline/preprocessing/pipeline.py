@@ -5,7 +5,6 @@ from __future__ import annotations
 from sklearn.pipeline import Pipeline
 
 from kaggle_pipeline.config import Config
-from kaggle_pipeline.preprocessing.selection import CorrelationPruner
 from kaggle_pipeline.preprocessing.transformers import (
     CategoricalTyper,
     FeatureEngineer,
@@ -17,11 +16,10 @@ CATEGORICAL_TYPER_STEP = "categorical_typer"
 
 
 def build_pretrain_pipeline(config: Config) -> Pipeline:
-    """Feature engineering -> categorical typing -> ordinal encoding [-> pruning].
+    """Feature engineering -> categorical typing -> ordinal encoding.
 
     Fitted once on the training frame and then applied to test; this is distinct
-    from the per-model preprocessing baked into each estimator's own pipeline. The
-    correlation pruner is appended only when ``config.prune_features`` is set.
+    from the per-model preprocessing baked into each estimator's own pipeline.
     """
     steps = [
         ("feature_engineer", FeatureEngineer(expressions=config.feature_expressions)),
@@ -40,18 +38,6 @@ def build_pretrain_pipeline(config: Config) -> Pipeline:
             ),
         ),
     ]
-    if config.prune_features:
-        steps.append(
-            (
-                "correlation_pruner",
-                CorrelationPruner(
-                    target=config.target,
-                    id_col=config.id_col,
-                    alpha=config.prune_alpha,
-                    redundancy_floor=config.redundancy_floor,
-                ),
-            )
-        )
     return Pipeline(steps)
 
 

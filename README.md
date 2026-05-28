@@ -604,7 +604,6 @@ The most important fields:
 | `prediction_aim` | `category` or `probability` |
 | `feature_expressions` | `pandas.eval` expressions for new features |
 | `categorical_encoding` | Per-column encoding for non-native models (see below) |
-| `prune_features`, `prune_alpha`, `redundancy_floor` | Auto-drop irrelevant / redundant predictors (see below) |
 | `n_steps`, `num_models`, `step_batch_size` | Search budget and leaderboard size |
 | `ensemble_length`, `ensemble_min_repr` | Ensemble size and min models kept per class |
 | `speed_up` | Subsample data for fast debugging |
@@ -655,30 +654,6 @@ categorical_encoding:
 
 The resolved plan is printed as `[encoding] ...` lines when the data loads, so
 each column's chosen strategy is visible in the run log.
-
-### Feature pruning
-
-On by default (`prune_features`), the pretrain pipeline drops predictors that
-carry no usable signal, with **size-inferred** thresholds:
-
-- **Uncorrelated with the target** — a predictor whose association with the
-  target is below `τ(n)`, the smallest correlation distinguishable from noise at
-  level `prune_alpha`. `τ(n)` shrinks as the dataset grows, so big datasets keep
-  weaker-but-real signals.
-- **Redundant** — two predictors are collapsed (keeping the more
-  target-relevant one) only when we are `1 − prune_alpha` confident their *true*
-  association exceeds `redundancy_floor` (default 0.90), i.e. the lower end of a
-  Fisher-z confidence interval clears the floor. Confidence (not just the point
-  estimate) is what makes this size-aware.
-
-Mixed types are handled via the same association measures as the EDA heatmap
-(`|Pearson r|`, correlation ratio, Cramér's V).
-
-**Data-quality alarm:** if a predictor looks uncorrelated with the target *yet*
-is strongly correlated with another predictor that **is** target-relevant, that
-breaks correlation transitivity (suppression, non-linearity, or leakage). The
-predictor is **kept** and a loud `[prune] SUSPICIOUS …` warning is logged rather
-than dropped. All drops are logged as `[prune] …` lines.
 
 ## Adding a model
 
@@ -785,7 +760,7 @@ those are pulled in only for the standalone `analyze` flow. Dev extras
 - Progress output goes through Python's `logging` (the `kaggle_pipeline` logger)
   rather than `print`. How much is shown is the `verbosity` config field:
   `quiet` (warnings/errors only), `normal` (stage progress plus the autodetected
-  fields, prune summary, each tested model's score and timing, chosen-ensemble
+  fields, each tested model's score and timing, chosen-ensemble
   score and submission path) or `verbose` (the default: adds the sampled
   per-model parameters, the full leaderboard after each step, the encoding plan
   and a submission preview). The CLI flags `-v`/`--verbose` and

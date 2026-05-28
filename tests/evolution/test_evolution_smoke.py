@@ -29,8 +29,10 @@ def test_controller_runs_batches(synthetic, originals, scoring_ctx):
         ctrl.run_batch(train_frame=df, scoring_ctx=scoring_ctx, y=y, n_models=4) for _ in range(2)
     ]
 
-    # Features were generated and the active pool grew.
+    # Features were generated and the active pool grew, and the new column names
+    # are captured on the batch summary (for verbosity-aware printing).
     assert len(ctrl.registry.get_active_features()) >= n_features_start
+    assert any(s.generated_feature_names for s in summaries)
     # Models were trained and completed without crashing the loop.
     assert ctrl.population.completed()
     assert any(s.n_completed > 0 for s in summaries)

@@ -96,6 +96,7 @@ def _models_section(population: ModelPopulation) -> dict[str, Any]:
                 "family": g.family,
                 "score": round(g.score_set.score, 4) if g.score_set else None,
                 "utility": round(g.utility, 4) if g.utility is not None else None,
+                "genes": g.gene_summary(),
             }
             for g in top
         ],
@@ -150,6 +151,15 @@ def _batch_section(last_batch: Any | None) -> dict[str, Any]:
     }
 
 
+def _format_genes(genes: list[str], *, full: bool, cap: int = 12) -> str:
+    """Join a model's gene list, capping the (potentially long) list unless ``full``."""
+    if not genes:
+        return "(none)"
+    if full or len(genes) <= cap:
+        return ", ".join(genes)
+    return ", ".join(genes[:cap]) + f", +{len(genes) - cap} more"
+
+
 def format_summary(summary: dict[str, Any], level: int) -> str:
     """Render ``summary`` to text at the given detail ``level`` (1..4)."""
     if level <= 0:
@@ -188,6 +198,12 @@ def format_summary(summary: dict[str, Any], level: int) -> str:
         )
 
     if level >= 3:
+        # List each top model's genes (structure, not hyperparameters); the full
+        # feature list is shown at DEBUG, capped otherwise.
+        for m in models["top_models"]:
+            genes = _format_genes(m.get("genes", []), full=level >= 4)
+            lines.append(f"  model {m['model_id']} [{m['family']}] score={m['score']}")
+            lines.append(f"      genes: {genes}")
         top_feats = ", ".join(f"{f['name']}({f['utility']})" for f in feats["top_features"])
         lines.append(f"  top features: {top_feats}")
         lines.append(f"  weakest removable: {feats['weakest_removable_feature']}")

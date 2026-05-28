@@ -25,12 +25,6 @@ from kaggle_pipeline.preprocessing.pipeline import (
     CATEGORICAL_TYPER_STEP,
     build_pretrain_pipeline,
 )
-from kaggle_pipeline.preprocessing.selection import (
-    CorrelationPruner,
-    irrelevance_threshold,
-    plan_pruning,
-    redundancy_lower_bound,
-)
 from kaggle_pipeline.preprocessing.target import (
     TargetTransforms,
     build_target_transforms,
@@ -60,10 +54,6 @@ __all__ = [
     "association_matrix",
     "cramers_v",
     "correlation_ratio",
-    "CorrelationPruner",
-    "plan_pruning",
-    "irrelevance_threshold",
-    "redundancy_lower_bound",
     "build_pretrain_pipeline",
     "CATEGORICAL_TYPER_STEP",
     "build_target_transforms",

@@ -59,7 +59,6 @@ def smoke_config(synthetic_data_dir: Path, tmp_path: Path) -> Config:
         scoring="balanced_accuracy",
         prediction_aim="category",
         feature_expressions=[],
-        prune_features=False,  # keep all synthetic predictors; pruning is tested separately
         n_steps=1,
         num_models=20,
         step_batch_size=8,

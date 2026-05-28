@@ -36,7 +36,7 @@ from kaggle_pipeline.evolution.features.materialization import (
     GLOBAL_TRAIN,
     MaterializationContext,
 )
-from kaggle_pipeline.evolution.features.registry import FeatureRegistry
+from kaggle_pipeline.evolution.features.registry import INSERTED, REPLACED, FeatureRegistry
 from kaggle_pipeline.evolution.models.factory import ModelFactory
 from kaggle_pipeline.evolution.models.genome import ModelGenome
 from kaggle_pipeline.evolution.models.lifecycle import ModelStatus
@@ -67,6 +67,7 @@ class BatchSummary:
     n_features_generated: int = 0
     best_score: float | None = None
     promoted: list[str] = field(default_factory=list)
+    generated_feature_names: list[str] = field(default_factory=list)
 
 
 class EvolutionController:
@@ -172,6 +173,11 @@ class EvolutionController:
             batch=batch,
             n_features_active=len(self.registry.get_active_features()),
             n_features_generated=feature_report.inserted + feature_report.replaced,
+            generated_feature_names=[
+                r.genome.human_name
+                for r in feature_report.insertions
+                if r.status in (INSERTED, REPLACED)
+            ],
         )
 
         # 1) Produce genomes (main thread), deduplicating by genome hash.

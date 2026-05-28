@@ -147,7 +147,6 @@ def test_build_pipeline_with_full_autodetect(synthetic_data_dir: Path, tmp_path:
         num_models=4,
         step_batch_size=2,
         n_workers=1,
-        prune_features=False,  # this test is about autodetection, not pruning
         data_dir=synthetic_data_dir,
         storage_dir=tmp_path / "models",
     )

@@ -49,3 +49,10 @@ def test_model_id_derives_from_hash():
     g = _genome()
     assert g.model_id.startswith("m_")
     assert g.feature_ids() == ["orig::a", "orig::b"]
+
+
+def test_gene_summary_lists_structure_not_hyperparameters():
+    summary = _genome().gene_summary()
+    assert any(s.startswith("base=") for s in summary)  # base model gene
+    assert any(s.startswith("feat:") for s in summary)  # feature reference genes
+    assert not any("learning_rate" in s for s in summary)  # hyperparameters excluded
