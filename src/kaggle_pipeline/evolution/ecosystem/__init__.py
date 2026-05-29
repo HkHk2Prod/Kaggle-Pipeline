@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from kaggle_pipeline.evolution.ecosystem.resume import find_previous_state_dir
 from kaggle_pipeline.evolution.ecosystem.serialization import EcosystemSerializer
 from kaggle_pipeline.evolution.ecosystem.state import EcosystemState
 from kaggle_pipeline.evolution.ecosystem.summary import (
@@ -13,5 +14,6 @@ __all__ = [
     "EcosystemState",
     "EcosystemSerializer",
     "build_ecosystem_summary",
+    "find_previous_state_dir",
     "format_summary",
 ]

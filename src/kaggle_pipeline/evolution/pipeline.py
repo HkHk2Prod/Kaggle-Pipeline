@@ -29,6 +29,7 @@ from kaggle_pipeline.evolution.controllers.evolution_controller import (
     BatchSummary,
     EvolutionController,
 )
+from kaggle_pipeline.evolution.ecosystem.resume import find_previous_state_dir
 from kaggle_pipeline.evolution.ecosystem.serialization import EcosystemSerializer
 from kaggle_pipeline.evolution.ecosystem.state import EcosystemState
 from kaggle_pipeline.evolution.ecosystem.summary import build_ecosystem_summary, format_summary
@@ -767,9 +768,20 @@ class KagglePipeline:
         self.log(f"checkpoint saved ({reason}) -> {out}", level=Verbosity.NORMAL)
         return out
 
-    def load_state(self, path: str | Path | None = None, *, strict: bool = False) -> EcosystemState:
-        """Load a saved ecosystem state and rebuild the controller around it."""
-        state = self.serializer.load(path)
+    def load_state(
+        self,
+        path: str | Path | None = None,
+        *,
+        strict: bool = False,
+        serializer: EcosystemSerializer | None = None,
+    ) -> EcosystemState:
+        """Load a saved ecosystem state and rebuild the controller around it.
+
+        ``serializer`` overrides the default (local ``state_dir``) loader -- used
+        for warm-starting from a previous run's directory while continuing to
+        write new checkpoints into ``self.serializer``'s local dir.
+        """
+        state = (serializer or self.serializer).load(path)
         from kaggle_pipeline.evolution.ecosystem.state import PIPELINE_VERSION
 
         if state.pipeline_version != PIPELINE_VERSION:
@@ -827,7 +839,10 @@ class KagglePipeline:
 
     def _resume_latest(self) -> None:
         """Merge the latest saved population/registry into the prepared controller."""
-        if self.serializer.latest_path() is None or self.controller is None:
+        if self.controller is None:
+            return
+        load_serializer = self._pick_resume_serializer()
+        if load_serializer is None:
             self.log(
                 "resume requested but no checkpoint found; starting fresh", level=Verbosity.SUMMARY
             )
@@ -836,10 +851,24 @@ class KagglePipeline:
         eval_frame = self.controller._eval_context.frame
         eval_y = self.controller._eval_y
         task = self.controller._task
-        self.load_state()
+        self.load_state(serializer=load_serializer)
         assert self.controller is not None
         # Re-attach the feature evaluation context to the restored registry.
         self.controller.initialize_features([], eval_frame=eval_frame, y=eval_y, task=task)
+
+    def _pick_resume_serializer(self) -> EcosystemSerializer | None:
+        """Find the dir to load from; prefer the local state_dir if it has data."""
+        if self.serializer.latest_path() is not None:
+            return self.serializer
+        prev = find_previous_state_dir(
+            previous_state_dir=self.settings.previous_state_dir,
+            state_dir_name=Path(self.settings.state_dir).name,
+        )
+        if prev is None:
+            return None
+        self.log(f"resuming from previous run at {prev}", level=Verbosity.NORMAL)
+        # Read-only loader: don't touch keep_last_n / atomic write semantics.
+        return EcosystemSerializer(prev, keep_last_n=self.settings.keep_last_n_checkpoints)
 
     # --- helpers ------------------------------------------------------------
     def _config_snapshot(self) -> dict[str, Any]:
