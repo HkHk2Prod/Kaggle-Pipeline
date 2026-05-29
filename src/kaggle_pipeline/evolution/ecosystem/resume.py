@@ -6,10 +6,12 @@ previous output as an input dataset, which mounts under ``/kaggle/input/``.
 ``find_previous_state_dir`` resolves where to load from:
 
 1. An explicit ``previous_state_dir`` always wins (used in offline / local runs).
-2. Otherwise scan ``/kaggle/input/`` a couple of levels deep for any directory
-   named ``state_dir`` (default ``kagglepipeline_state``) that holds a
-   non-empty ``checkpoints/`` folder, and return the one whose newest
-   checkpoint is the most recent.
+2. Otherwise scan ``/kaggle/input/`` recursively for any directory named
+   ``state_dir`` (default ``kagglepipeline_state``) that holds a non-empty
+   ``checkpoints/`` folder, and return the one whose newest checkpoint is the
+   most recent. The recursive walk handles every Kaggle layout: attached
+   datasets (``/kaggle/input/<dataset>/...``) and notebook outputs
+   (``/kaggle/input/notebooks/<user>/<slug>/...``).
 
 Returns ``None`` when nothing is found -- the caller starts fresh.
 """
@@ -34,12 +36,7 @@ def find_previous_state_dir(
 
     if not kaggle_root.is_dir():
         return None
-    candidates = [
-        match
-        for pattern in (f"*/{state_dir_name}", f"*/*/{state_dir_name}")
-        for match in kaggle_root.glob(pattern)
-        if _has_checkpoints(match)
-    ]
+    candidates = [match for match in kaggle_root.rglob(state_dir_name) if _has_checkpoints(match)]
     if not candidates:
         return None
     return max(candidates, key=_latest_checkpoint_mtime)

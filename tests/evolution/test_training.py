@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 
 import numpy as np
 import pandas as pd
 import pytest
 
+from kaggle_pipeline.evolution.genes.base import BaseModelGene
+from kaggle_pipeline.evolution.genes.feature_reference_gene import FeatureReferenceGene
+from kaggle_pipeline.evolution.models.genome import ModelGenome
+from kaggle_pipeline.evolution.models.parameter_spaces import build_default_families
 from kaggle_pipeline.evolution.models.training import (
     _LGBM_FORBIDDEN_NAME_CHARS,
+    ModelTrainer,
     _SanitizeFeatureNames,
 )
 
@@ -76,3 +82,70 @@ def test_lightgbm_accepts_sanitised_names_from_a_pipeline():
     pipe.fit(X, y)
     proba = pipe.predict_proba(X)
     assert proba.shape == (40, 2)
+
+
+def _numeric_cols(pipeline) -> list[str]:
+    for name, _transformer, cols in pipeline.named_steps["prep"].transformers:
+        if name == "num":
+            return list(cols)
+    return []
+
+
+@pytest.fixture
+def training_logs(caplog):
+    """Caplog wrapper that bypasses ``propagate=False`` on the package logger.
+
+    ``kaggle_pipeline.logconfig`` sets ``propagate=False`` so root handlers stay
+    quiet; pytest's caplog attaches to root, so it sees nothing without help.
+    Attaching caplog's handler directly to the training logger fixes this.
+    """
+    target = logging.getLogger("kaggle_pipeline.evolution.models.training")
+    target.addHandler(caplog.handler)
+    prev_level = target.level
+    target.setLevel(logging.WARNING)
+    try:
+        yield caplog
+    finally:
+        target.removeHandler(caplog.handler)
+        target.setLevel(prev_level)
+
+
+def test_build_pipeline_dedups_duplicate_feature_refs(registry, synthetic, training_logs):
+    # A genome with the same feature_id twice would otherwise emit two `num__orig::num1`
+    # columns out of the ColumnTransformer and trip LightGBM's duplicate-feature check.
+    df, _ = synthetic
+    genome = ModelGenome(
+        base_model_gene=BaseModelGene("lightgbm"),
+        feature_reference_genes=[
+            FeatureReferenceGene("orig::num1"),
+            FeatureReferenceGene("orig::num2"),
+            FeatureReferenceGene("orig::num1"),
+        ],
+    )
+    X = pd.DataFrame({"orig::num1": df["num1"].to_numpy(), "orig::num2": df["num2"].to_numpy()})
+    trainer = ModelTrainer(registry, families=build_default_families())
+
+    pipeline = trainer._build_pipeline(genome, X, seed=0)
+
+    assert _numeric_cols(pipeline) == ["orig::num1", "orig::num2"]
+    assert any(
+        "duplicate feature references" in r.getMessage() and "orig::num1" in r.getMessage()
+        for r in training_logs.records
+    )
+
+
+def test_build_pipeline_unique_refs_does_not_warn(registry, synthetic, training_logs):
+    df, _ = synthetic
+    genome = ModelGenome(
+        base_model_gene=BaseModelGene("lightgbm"),
+        feature_reference_genes=[
+            FeatureReferenceGene("orig::num1"),
+            FeatureReferenceGene("orig::num2"),
+        ],
+    )
+    X = pd.DataFrame({"orig::num1": df["num1"].to_numpy(), "orig::num2": df["num2"].to_numpy()})
+    trainer = ModelTrainer(registry, families=build_default_families())
+
+    trainer._build_pipeline(genome, X, seed=0)
+
+    assert not any("duplicate feature references" in r.getMessage() for r in training_logs.records)

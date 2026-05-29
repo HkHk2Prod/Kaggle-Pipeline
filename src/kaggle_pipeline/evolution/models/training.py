@@ -16,6 +16,7 @@ leakage-safe; target encoding remains a TODO (it needs the OOF path).
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, cast
@@ -273,9 +274,25 @@ class ModelTrainer:
         )
         estimator = fam.build_estimator(params, n_estimators=n_estimators, random_state=seed)
 
+        # Dedup feature references by id: duplicates would cause LightGBM to
+        # reject the matrix ("Feature ... appears more than one time") because
+        # the ColumnTransformer emits one output column per occurrence. The
+        # feature frame already collapses duplicates via dict semantics, so
+        # dropping the extra refs here is lossless. Keep first occurrence for
+        # deterministic ordering.
+        unique_refs = list({fr.feature_id: fr for fr in genome.feature_reference_genes}.values())
+        if len(unique_refs) != len(genome.feature_reference_genes):
+            counts = Counter(genome.feature_ids())
+            dupes = sorted(fid for fid, n in counts.items() if n > 1)
+            logger.warning(
+                "genome %s had duplicate feature references %s; deduped before fit",
+                genome.model_id,
+                dupes,
+            )
+
         numeric_cols: list[str] = []
         transformers: list[tuple[str, Any, list[str]]] = []
-        for fr in genome.feature_reference_genes:
+        for fr in unique_refs:
             feature = self.registry.get_feature(fr.feature_id)
             if feature.output_type == CATEGORICAL:
                 if fr.encoding is None:
