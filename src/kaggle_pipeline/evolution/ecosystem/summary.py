@@ -95,6 +95,9 @@ def _models_section(population: ModelPopulation) -> dict[str, Any]:
                 "model_id": g.model_id,
                 "family": g.family,
                 "score": round(g.score_set.score, 4) if g.score_set else None,
+                "score_std": round(g.score_set.score_std, 4) if g.score_set else None,
+                "compute_time": round(g.score_set.compute_time, 2) if g.score_set else None,
+                "n_features": g.score_set.n_features if g.score_set else None,
                 "utility": round(g.utility, 4) if g.utility is not None else None,
                 "genes": g.gene_summary(),
             }
@@ -199,11 +202,20 @@ def format_summary(summary: dict[str, Any], level: int) -> str:
 
     if level >= 3:
         # List each top model's genes (structure, not hyperparameters); the full
-        # feature list is shown at DEBUG, capped otherwise.
+        # feature list is shown at DEBUG, capped otherwise. The model header keeps
+        # score, std, training time and feature count on one line so the genes
+        # render immediately under it with no visual gap.
         for m in models["top_models"]:
             genes = _format_genes(m.get("genes", []), full=level >= 4)
-            lines.append(f"  model {m['model_id']} [{m['family']}] score={m['score']}")
-            lines.append(f"      genes: {genes}")
+            time_part = f" time={m['compute_time']}s" if m.get("compute_time") is not None else ""
+            std_part = f"±{m['score_std']}" if m.get("score_std") is not None else ""
+            feats_part = f" feats={m['n_features']}" if m.get("n_features") is not None else ""
+            lines.append(
+                f"  model {m['model_id']} [{m['family']}] "
+                f"score={m['score']}{std_part}{time_part}{feats_part} "
+                f"util={m['utility']}"
+            )
+            lines.append(f"    genes: {genes}")
         top_feats = ", ".join(f"{f['name']}({f['utility']})" for f in feats["top_features"])
         lines.append(f"  top features: {top_feats}")
         lines.append(f"  weakest removable: {feats['weakest_removable_feature']}")

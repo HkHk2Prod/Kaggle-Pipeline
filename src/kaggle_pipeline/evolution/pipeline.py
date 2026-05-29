@@ -34,7 +34,12 @@ from kaggle_pipeline.evolution.ecosystem.state import EcosystemState
 from kaggle_pipeline.evolution.ecosystem.summary import build_ecosystem_summary, format_summary
 from kaggle_pipeline.evolution.ensemble.manager import EnsembleManager, EnsembleResult
 from kaggle_pipeline.evolution.features.recipe import CATEGORICAL, NUMERIC
-from kaggle_pipeline.evolution.logging_utils import Verbosity, configure_logging
+from kaggle_pipeline.evolution.logging_utils import (
+    Verbosity,
+    configure_logging,
+    format_batch_banner,
+    format_phase_banner,
+)
 from kaggle_pipeline.evolution.models.parameter_spaces import build_default_families
 from kaggle_pipeline.evolution.runtime import RuntimeManager
 from kaggle_pipeline.evolution.scheduler import TaskScheduler
@@ -129,6 +134,19 @@ class KagglePipeline:
         else:
             logger.info(message)
 
+    def _log_phase(self, name: str) -> None:
+        """Emit a banner marking a top-level phase boundary.
+
+        Banners go through SUMMARY so they're visible on any non-silent run --
+        they're the only structural cue that tells "preparation done, training
+        starting" apart from the per-batch lines.
+        """
+        self.log(format_phase_banner(name), level=Verbosity.SUMMARY)
+
+    def _log_batch_separator(self, batch: int, *, end: bool = False) -> None:
+        """Emit a separator line bracketing a batch's logs."""
+        self.log(format_batch_banner(batch, end=end), level=Verbosity.SUMMARY)
+
     # --- fit / run ----------------------------------------------------------
     def fit(
         self,
@@ -185,6 +203,7 @@ class KagglePipeline:
         feature_types,
         resume,
     ) -> None:
+        self._log_phase("preparation")
         self._id_col = id_col
         # 1) Autodetect target/task/scoring/prediction_aim on the RAW frame (before
         #    engineering, so the "last non-id column" target heuristic is not fooled
@@ -330,7 +349,7 @@ class KagglePipeline:
             enable_ensembling=self.settings.enable_ensembling,
         )
         self._last_checkpoint_time = time.monotonic()
-        self.log("training started", level=Verbosity.NORMAL)
+        self._log_phase("training")
         self._log_runtime_budget()
         try:
             while not self.runtime.should_stop_training():
@@ -346,6 +365,8 @@ class KagglePipeline:
                         level=Verbosity.NORMAL,
                     )
                     break
+                next_batch = self.controller.registry.current_batch + 1
+                self._log_batch_separator(next_batch)
                 self.log(
                     f"batch start: estimate={batch_estimate:.0f}s, "
                     f"remaining_training={self.runtime.remaining_training_seconds():.0f}s",
@@ -358,7 +379,9 @@ class KagglePipeline:
                 if self.settings.checkpoint_every_batch:
                     self.checkpoint(reason="batch_complete")
                 self.print_state()
+                self._log_batch_separator(summary.batch, end=True)
             self.checkpoint(reason="training_finished")
+            self._log_phase("finalization")
             self._finalize()
             self._maybe_make_submission()
             self.checkpoint(reason="final")
@@ -478,6 +501,7 @@ class KagglePipeline:
             )
             return None
         try:
+            self._log_phase("submission")
             self.log(
                 f"writing submission (reserve={self.runtime.submission_time_reserve_seconds:.0f}s, "
                 f"remaining={self.runtime.remaining_submission_seconds():.0f}s)"
@@ -566,7 +590,59 @@ class KagglePipeline:
         self.log(
             f"submission written to {out} (columns {list(frame.columns)})", level=Verbosity.NORMAL
         )
+        self._log_submission_summary(out, frame, predictions)
         return out
+
+    def _log_submission_summary(
+        self, path: Path, frame: pd.DataFrame, predictions: np.ndarray
+    ) -> None:
+        """Print the submission's OOF score, error and ensemble composition.
+
+        Goes at SUMMARY so the headline numbers stay visible at low verbosity;
+        a per-member breakdown is added at NORMAL+ so the user always sees what
+        actually shipped without forcing DEBUG-level chatter for the rest of
+        the run.
+        """
+        proba = np.asarray(predictions, dtype=float)
+        finite = bool(np.isfinite(proba).all())
+        result = self.ensemble_result
+        if result is None:
+            self.log(
+                f"submission summary: file={path} rows={len(frame)} cols={list(frame.columns)} "
+                f"finite_predictions={finite} -- ensemble=disabled (best single model)",
+                level=Verbosity.SUMMARY,
+            )
+            return
+        score = f"{result.oof_score:.4f}" if result.oof_score is not None else "n/a"
+        self.log(
+            f"submission summary: file={path} rows={len(frame)} "
+            f"cols={list(frame.columns)} finite_predictions={finite}",
+            level=Verbosity.SUMMARY,
+        )
+        self.log(
+            f"ensemble: strategy={result.status} members={result.n_members} "
+            f"oof_score={score}" + (f" note={result.note}" if result.note else ""),
+            level=Verbosity.SUMMARY,
+        )
+        if self.controller is None or not result.member_ids:
+            return
+        rows: list[str] = []
+        for mid in result.member_ids:
+            try:
+                genome = self.controller.population.get(mid)
+            except KeyError:
+                continue
+            weight = result.weights.get(mid, 0.0)
+            score_set = genome.score_set
+            member_score = f"{score_set.score:.4f}" if score_set else "n/a"
+            member_std = f"±{score_set.score_std:.4f}" if score_set else ""
+            member_time = f" time={score_set.compute_time:.2f}s" if score_set else ""
+            rows.append(
+                f"  - {mid} [{genome.family}] weight={weight:.3f} "
+                f"score={member_score}{member_std}{member_time}"
+            )
+        if rows:
+            self.log("ensemble composition:\n" + "\n".join(rows), level=Verbosity.NORMAL)
 
     def _submission_from_sample(
         self, sample: pd.DataFrame, predictions: np.ndarray
@@ -719,9 +795,32 @@ class KagglePipeline:
         self.log(
             f"restored state: batch={state.batch_index}, "
             f"{len(state.population.all_genomes())} models",
-            level=Verbosity.NORMAL,
+            level=Verbosity.SUMMARY,
         )
+        self._log_loaded_ecosystem(state)
         return state
+
+    def _log_loaded_ecosystem(self, state: EcosystemState) -> None:
+        """Print the full ecosystem summary right after restoring from a checkpoint.
+
+        The user sees what the loaded population/features look like at the
+        verbosity they asked for: SUMMARY users get the one-line headline,
+        DETAILED+ users get the same level of detail they'd see after a batch.
+        """
+        verbosity = self.settings.verbosity
+        if verbosity <= Verbosity.SILENT or self.controller is None:
+            return
+        summary = build_ecosystem_summary(
+            self.controller.registry,
+            self.controller.population,
+            self.runtime,
+            batch_index=state.batch_index,
+            last_batch=None,
+            ensemble=state.ensemble_state,
+        )
+        text = format_summary(summary, verbosity)
+        if text:
+            logger.info("loaded ecosystem state\n%s", text)
 
     def restore_from_checkpoint(self, path: str | Path) -> EcosystemState:
         return self.load_state(path)
