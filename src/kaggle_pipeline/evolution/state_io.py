@@ -62,7 +62,7 @@ def rebuild_controller_from_state(
     settings: KagglePipelineSettings,
     families: Any,
     n_splits: int,
-    seed: int,
+    seed: int | None,
 ) -> EvolutionController:
     """Reconstruct an EvolutionController around a restored ecosystem state."""
     from kaggle_pipeline.evolution.controllers.evolution_controller import EvolutionController
