@@ -109,6 +109,16 @@ class EvolutionSettings:
     score_std_penalty: float = 1.75
     # Divide the utility numerator by 1 + log(1 + time / t_ref) when enabled.
     compute_penalty_enabled: bool = True
+    # After each batch, each active model gets a soft penalty subtracted from
+    # its score equal to ``scale * max(0, max_corr - threshold)`` where
+    # ``max_corr`` is the largest signed Pearson r between its residual errors
+    # (``oof - y``) and any active model with a *strictly higher* raw score.
+    # The top scorer is never penalised; the rest are pushed down whenever they
+    # mostly repeat a better model's mistakes. ``scale = 10`` makes ``r = 0.99``
+    # cost 0.15 -- severe for roc_auc-scale metrics. Set ``scale <= 0`` to
+    # disable the pass.
+    correlation_penalty_threshold: float = 0.975
+    correlation_penalty_scale: float = 10.0
 
     # --- Controller policy --------------------------------------------------
     # Parent selection: sample this many candidates, keep the best by utility.

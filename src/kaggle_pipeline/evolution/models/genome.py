@@ -15,6 +15,7 @@ skip retraining duplicates.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,6 +26,9 @@ from kaggle_pipeline.evolution.genes.resource_gene import ResourceGene
 from kaggle_pipeline.evolution.models.lifecycle import ModelStatus
 from kaggle_pipeline.evolution.models.scoring import ModelScoreSet
 from kaggle_pipeline.evolution.storage.hashing import short_hash, stable_hash
+from kaggle_pipeline.evolution.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -41,8 +45,15 @@ class ModelGenome:
     mutation_history: list[str] = field(default_factory=list)
     status: str = ModelStatus.CREATED
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Individual scores. Each one is read via :meth:`get_score` so that
+    # ``None`` (or a wholly missing attribute on a pickled-from-older-version
+    # genome) triggers a lazy recompute via a recomputer that the surrounding
+    # ``ModelPopulation`` registers at admission time. The combined leaderboard
+    # score is never stored -- it's always derived in
+    # ``ModelPopulation.effective_*`` from these individual fields.
     score_set: ModelScoreSet | None = None
     utility: float | None = None
+    correlation_penalty: float | None = None
     # Derived; set in __post_init__.
     genome_hash: str = field(default="", compare=False)
     model_id: str = field(default="", compare=False)
@@ -51,6 +62,12 @@ class ModelGenome:
         self.genome_hash = self.compute_hash()
         if not self.model_id:
             self.model_id = f"m_{short_hash(self.genome_hash, 16)}"
+        # Per-instance score plumbing. Not part of identity / hash. Excluded
+        # from pickle (see ``__getstate__``) because the recompute callbacks
+        # close over the live ``ModelPopulation``; on resume the population
+        # rewires them via ``wire_all_score_recomputers``.
+        self._score_recomputers: dict[str, Callable[[], None]] = {}
+        self._warned_score_names: set[str] = set()
 
     # --- hashing ------------------------------------------------------------
     def compute_hash(self) -> str:
@@ -75,6 +92,73 @@ class ModelGenome:
             "config_version": self.metadata.get("config_version"),
         }
         return stable_hash(payload)
+
+    # --- individual scores (lazy recompute on miss) -------------------------
+    # Each individual score (``utility``, ``correlation_penalty``, future ones)
+    # is read through :meth:`get_score`. When the stored value is ``None`` or
+    # the attribute is wholly missing (an older pickle predating the field),
+    # we warn once per genome-name pair and run the registered recomputer; the
+    # recomputer is expected to set the attribute as a side effect. Combined
+    # scores (the leaderboard, ensemble-candidate ranking) are never stored:
+    # they live in ``ModelPopulation.effective_*`` and stack individual scores
+    # on the fly, so a new score type only has to wire its recomputer to be
+    # consumed by all existing leaderboards.
+    def register_score_recomputer(self, name: str, recompute: Callable[[], None]) -> None:
+        """Tell this genome how to recompute the individual score ``name``."""
+        recs = self._score_recomputer_map()
+        recs[name] = recompute
+
+    def get_score(self, name: str) -> Any:
+        """Return individual score ``name``; on miss, warn once and recompute.
+
+        ``None`` or a missing attribute counts as miss. The recomputer is
+        invoked and is expected to populate the attribute; we return whatever
+        it set (or ``None`` if it produced nothing).
+        """
+        value = getattr(self, name, None)
+        if value is not None:
+            return value
+        warned = self._warned_score_names_set()
+        if name not in warned:
+            logger.warning(
+                "score '%s' missing for model %s; recomputing on demand",
+                name,
+                self.model_id,
+            )
+            warned.add(name)
+        recompute = self._score_recomputer_map().get(name)
+        if recompute is None:
+            return None
+        recompute()
+        return getattr(self, name, None)
+
+    def _score_recomputer_map(self) -> dict[str, Callable[[], None]]:
+        # Lazy-init handles pickles from before the attribute existed.
+        recs = getattr(self, "_score_recomputers", None)
+        if recs is None:
+            self._score_recomputers = {}
+            recs = self._score_recomputers
+        return recs
+
+    def _warned_score_names_set(self) -> set[str]:
+        warned = getattr(self, "_warned_score_names", None)
+        if warned is None:
+            self._warned_score_names = set()
+            warned = self._warned_score_names
+        return warned
+
+    def __getstate__(self) -> dict[str, Any]:
+        # Drop the live recomputer closures / warn-set from the pickle; the
+        # population re-wires recomputers via ``wire_all_score_recomputers``.
+        state = self.__dict__.copy()
+        state.pop("_score_recomputers", None)
+        state.pop("_warned_score_names", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._score_recomputers = {}
+        self._warned_score_names = set()
 
     # --- views --------------------------------------------------------------
     @property
