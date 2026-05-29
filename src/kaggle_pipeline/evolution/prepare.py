@@ -33,6 +33,9 @@ def autodetect_problem(
         prediction_aim=prediction_aim,
     )
     resolve_problem_definition(cfg, train_df)
+    # ``resolve_problem_definition`` guarantees these are filled in; the
+    # typecast lets callers consume them without re-narrowing.
+    assert cfg.target and cfg.task and cfg.scoring and cfg.prediction_aim
     return cfg.target[0], cfg.task, cfg.scoring, cfg.prediction_aim
 
 
@@ -52,7 +55,7 @@ def build_search_sample(
     *,
     fraction: float,
     cv_splits: int,
-    seed: int,
+    seed: int | None,
 ) -> tuple[pd.DataFrame, np.ndarray, bool]:
     """Return ``(features, y, used_subsample)`` for the evolutionary search.
 
