@@ -54,6 +54,26 @@ def test_scans_one_level_deeper(tmp_path):
     assert out == kaggle_root / "prev_output" / "subdir" / "kagglepipeline_state"
 
 
+def test_scans_notebook_output_layout(tmp_path):
+    """Kaggle's notebook-output layout: notebooks/<user>/<slug>/state_dir."""
+    kaggle_root = tmp_path / "kaggle_input"
+    kaggle_root.mkdir()
+    nb_state = kaggle_root / "notebooks" / "hkhk2prod" / "predicting-f1" / "kagglepipeline_state"
+    _make_state(nb_state)
+    out = find_previous_state_dir(previous_state_dir=None, kaggle_root=kaggle_root)
+    assert out == nb_state
+
+
+def test_scans_arbitrarily_deep(tmp_path):
+    """The walk should find a state dir at any depth under the kaggle root."""
+    kaggle_root = tmp_path / "kaggle_input"
+    kaggle_root.mkdir()
+    deep = kaggle_root / "a" / "b" / "c" / "d" / "e" / "kagglepipeline_state"
+    _make_state(deep)
+    out = find_previous_state_dir(previous_state_dir=None, kaggle_root=kaggle_root)
+    assert out == deep
+
+
 def test_picks_freshest_checkpoint_when_multiple_match(tmp_path):
     kaggle_root = tmp_path / "kaggle_input"
     kaggle_root.mkdir()
