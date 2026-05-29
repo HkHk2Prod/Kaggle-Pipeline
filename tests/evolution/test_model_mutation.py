@@ -87,3 +87,43 @@ def test_model_mutation_creates_child_without_touching_parent(registry, syntheti
     assert record.parent_model_id == parent.model_id
     assert record.child_model_id == child.model_id
     assert record.mutation_type
+
+
+def test_replace_feature_never_produces_duplicate(registry, settings):
+    """A replace-feature mutation must not collide with a sibling reference.
+
+    Regression for a LightGBM training failure: ``num__gen__<hash>`` appearing
+    twice because the new feature_id matched another reference already in the
+    genome. See [[evolution-training-integration]].
+    """
+    mutator = ModelMutator(registry, settings)
+    active = registry.get_active_features()
+    # Force the collision condition: a list that already references every
+    # active feature, so any non-self pick is guaranteed to clash.
+    feature_genes = [FeatureReferenceGene(f.feature_id) for f in active]
+    for seed in range(50):
+        rng = np.random.default_rng(seed)
+        record = type("R", (), {})()  # minimal stand-in; the operator only writes attrs
+        record.mutated_gene_ids = []
+        record.signed_amounts = []
+        record.old_values = []
+        record.new_values = []
+        record.removed_feature_ids = []
+        record.added_feature_ids = []
+        clone = [g.copy() for g in feature_genes]
+        ctx = _ctx(seed, registry=registry)
+        mutator._replace_feature(clone, ctx, record, rng)
+        ids = [g.feature_id for g in clone]
+        assert len(ids) == len(set(ids)), f"seed={seed}: duplicate feature_ids {ids}"
+
+
+def test_full_genome_mutations_never_produce_duplicates(registry, settings):
+    """End-to-end: many mutated children must each have distinct feature_ids."""
+    factory = ModelFactory(registry, settings)
+    mutator = ModelMutator(registry, settings)
+    rng = np.random.default_rng(7)
+    parent = factory.generate(rng, family="random_forest", batch=0)
+    for seed in range(100):
+        child, _ = mutator.mutate(parent, np.random.default_rng(seed), batch=1)
+        ids = child.feature_ids()
+        assert len(ids) == len(set(ids)), f"seed={seed}: duplicate feature_ids {ids}"

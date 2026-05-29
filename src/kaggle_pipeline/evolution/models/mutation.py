@@ -276,6 +276,12 @@ class ModelMutator:
         new_gene = gene.mutate(0.0, ctx)
         if new_gene.gene_id == gene.gene_id:  # replacement found nothing
             return
+        # gene.mutate only excludes the gene's own feature_id; sibling references
+        # in the same genome could collide and create duplicate columns at fit
+        # time (LightGBM rejects them outright). Skip if so.
+        siblings = {fr.feature_id for i, fr in enumerate(feature_genes) if i != idx}
+        if new_gene.feature_id in siblings:
+            return
         feature_genes[idx] = new_gene
         record.mutated_gene_ids.append(new_gene.gene_id)
         record.signed_amounts.append(0.0)
