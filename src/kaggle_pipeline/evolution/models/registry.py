@@ -23,6 +23,11 @@ from kaggle_pipeline.evolution.models.genome import ModelGenome
 from kaggle_pipeline.evolution.models.lifecycle import ModelStatus
 from kaggle_pipeline.evolution.models.mutation import MutationRecord
 from kaggle_pipeline.evolution.models.scoring import ModelUtility, comparable_stats
+from kaggle_pipeline.evolution.utils.arrays import (
+    pearson_correlation,
+    small_sample_adjusted_correlation,
+    standardize_for_correlation,
+)
 from kaggle_pipeline.evolution.utils.logging import get_logger
 from kaggle_pipeline.evolution.utils.random import spawn_rng
 
@@ -51,6 +56,15 @@ class ModelPopulation:
         # Optional store whose big OOF arrays are freed when a model is pruned;
         # wired by the controller. The genome + scores are always kept.
         self.oof_store: Any = None
+        # Target vector used to recompute residual-error correlation penalties
+        # on demand. Set by the pipeline once the search subsample is built and
+        # again on resume; ``None`` short-circuits the correlation recompute to
+        # zero (the warning still fires once).
+        self._search_y: np.ndarray | None = None
+
+    def set_search_target(self, y: np.ndarray | None) -> None:
+        """Bind the y vector that recomputers use to derive residual penalties."""
+        self._search_y = y
 
     # --- registration -------------------------------------------------------
     def has_genome_hash(self, genome_hash: str) -> bool:
@@ -70,7 +84,40 @@ class ModelPopulation:
             return existing
         self._by_id[genome.model_id] = genome
         self._by_hash[genome.genome_hash] = genome.model_id
+        self._wire_score_recomputers(genome)
         return genome
+
+    # --- score-recomputer wiring -------------------------------------------
+    # The lazy-recompute mechanism on the genome is generic: each individual
+    # score (``correlation_penalty``, ``utility``, future scores) is read via
+    # ``genome.get_score(name)``, which calls back into a closure registered
+    # here. Adding a new score type therefore means: declare the field on
+    # ``ModelGenome``, add a recompute method below, and register it in
+    # ``_wire_score_recomputers``. Every existing leaderboard that consumes
+    # ``effective_*`` automatically picks the new value up.
+    def wire_all_score_recomputers(self) -> None:
+        """Re-bind recomputers on every stored genome, used after pickle resume."""
+        for g in self._by_id.values():
+            self._wire_score_recomputers(g)
+
+    def _wire_score_recomputers(self, g: ModelGenome) -> None:
+        def _recompute_correlation() -> None:
+            self._recompute_correlation_for(g)
+
+        g.register_score_recomputer("correlation_penalty", _recompute_correlation)
+        g.register_score_recomputer("utility", self.update_utilities)
+
+    def _recompute_correlation_for(self, g: ModelGenome) -> None:
+        if self._search_y is None or self.oof_store is None:
+            # Nothing to compare against; record the absence so we don't keep
+            # firing the missing-score warning on every subsequent access.
+            g.correlation_penalty = 0.0
+            return
+        self.compute_correlation_penalties(
+            self._search_y,
+            threshold=self.settings.correlation_penalty_threshold,
+            scale=self.settings.correlation_penalty_scale,
+        )
 
     def add_mutation_record(self, record: MutationRecord) -> None:
         self.mutation_records.append(record)
@@ -106,9 +153,7 @@ class ModelPopulation:
     def update_elite(self) -> None:
         penalty = self.settings.score_std_penalty
         completed = [g for g in self.completed() if g.score_set is not None]
-        completed.sort(
-            key=lambda g: g.score_set.adj_score(penalty) if g.score_set else 0.0, reverse=True
-        )
+        completed.sort(key=lambda g: self.effective_adj_score(g, penalty), reverse=True)
         self.elite = [g.model_id for g in completed[: self.elite_size]]
 
     def prune_active(self) -> None:
@@ -116,7 +161,11 @@ class ModelPopulation:
         if len(self.active) <= self.max_active:
             return
         elite = set(self.elite)
-        ranked = sorted(self.active, key=lambda mid: self._by_id[mid].utility or 0.0, reverse=True)
+        ranked = sorted(
+            self.active,
+            key=lambda mid: self.effective_utility(self._by_id[mid]),
+            reverse=True,
+        )
         keep: list[str] = []
         for mid in ranked:
             if len(keep) < self.max_active or mid in elite:
@@ -127,6 +176,79 @@ class ModelPopulation:
                 if self.oof_store is not None:
                     self.oof_store.remove(mid)
         self.active = keep
+
+    # --- correlation penalty ------------------------------------------------
+    def compute_correlation_penalties(
+        self,
+        y: np.ndarray,
+        *,
+        threshold: float,
+        scale: float,
+    ) -> int:
+        """Set each active model's ``correlation_penalty`` from residual-error correlation.
+
+        For every active model, find its maximum *signed* Pearson ``r`` against
+        every active model with a *strictly higher* raw ``score_set.score``,
+        applied to the residuals ``oof - y``. The penalty is
+        ``scale * max(0, max_r - threshold)``; the top scorer is never penalised
+        (no higher peers). ``r`` is Olkin-Pratt corrected for sample size.
+
+        Returns the count of models that ended up with a non-zero penalty.
+        """
+        # Reset every active model's penalty before recomputation so a stale
+        # value from a previous batch never lingers on a now-uncontested model.
+        for mid in self.active:
+            self._by_id[mid].correlation_penalty = 0.0
+
+        if self.oof_store is None or scale <= 0.0 or len(self.active) < 2:
+            return 0
+
+        # Sort active models by raw score descending; ties keep registration order.
+        actives = [self._by_id[m] for m in self.active if self._by_id[m].score_set is not None]
+        actives.sort(key=lambda g: g.score_set.score if g.score_set else 0.0, reverse=True)
+
+        # Standardize residual vectors once per model (None for missing/constant).
+        standardized: dict[str, np.ndarray] = {}
+        for g in actives:
+            oof = self.oof_store.get(g.model_id)
+            if oof is None:
+                continue
+            residuals = _residuals(oof, y)
+            if residuals.size == 0:
+                continue
+            z = standardize_for_correlation(residuals)
+            if z is not None:
+                standardized[g.model_id] = z
+
+        affected = 0
+        for i, g in enumerate(actives):
+            z_self = standardized.get(g.model_id)
+            if z_self is None or g.score_set is None:
+                continue
+            max_r = -np.inf
+            self_score = g.score_set.score
+            for j in range(i):
+                other = actives[j]
+                if other.score_set is None or other.score_set.score <= self_score:
+                    # ``actives`` is sorted, so a non-greater score here means
+                    # every remaining peer is also not strictly higher.
+                    break
+                z_other = standardized.get(other.model_id)
+                if z_other is None or z_other.size != z_self.size:
+                    continue
+                r = pearson_correlation(z_self, z_other)
+                if r is None:
+                    continue
+                r = small_sample_adjusted_correlation(r, z_self.size)
+                if r > max_r:
+                    max_r = r
+            if not np.isfinite(max_r):
+                continue
+            penalty = scale * max(0.0, max_r - threshold)
+            g.correlation_penalty = penalty
+            if penalty > 0.0:
+                affected += 1
+        return affected
 
     # --- parent selection ---------------------------------------------------
     def family_counts(self) -> Counter:
@@ -147,19 +269,19 @@ class ModelPopulation:
         def score(model_id: str) -> float:
             g = self._by_id[model_id]
             diversity_penalty = 0.02 * counts.get(g.family, 0)
-            return (g.utility or 0.0) - diversity_penalty
+            return self.effective_utility(g) - diversity_penalty
 
         best_id = max((ids[int(i)] for i in np.atleast_1d(idx)), key=score)
         return self._by_id[best_id]
 
     # --- rankings -----------------------------------------------------------
     def efficient_search_ranking(self) -> list[ModelGenome]:
-        return sorted(self.completed(), key=lambda g: g.utility or 0.0, reverse=True)
+        return sorted(self.completed(), key=self.effective_utility, reverse=True)
 
     def absolute_score_ranking(self) -> list[ModelGenome]:
         return sorted(
             (g for g in self.completed() if g.score_set),
-            key=lambda g: g.score_set.score if g.score_set else 0.0,
+            key=self.effective_raw_score,
             reverse=True,
         )
 
@@ -167,9 +289,28 @@ class ModelPopulation:
         penalty = self.settings.score_std_penalty
         return sorted(
             (g for g in self.completed() if g.score_set),
-            key=lambda g: g.score_set.adj_score(penalty) if g.score_set else 0.0,
+            key=lambda g: self.effective_adj_score(g, penalty),
             reverse=True,
         )
+
+    # --- combined scores ----------------------------------------------------
+    # The "final" leaderboard score is never stored. Every selection path goes
+    # through these functions, which stack individual scores read via the
+    # genome's ``get_score`` (lazy-recomputed on miss with a warning). Adding a
+    # new score: declare a field on ``ModelGenome``, wire its recomputer in
+    # ``_wire_score_recomputers``, then include it in the formulas below.
+    def effective_raw_score(self, g: ModelGenome) -> float:
+        base = g.score_set.score if g.score_set else 0.0
+        return base - _coerce_float(g.get_score("correlation_penalty"))
+
+    def effective_adj_score(self, g: ModelGenome, std_penalty: float) -> float:
+        base = g.score_set.adj_score(std_penalty) if g.score_set else 0.0
+        return base - _coerce_float(g.get_score("correlation_penalty"))
+
+    def effective_utility(self, g: ModelGenome) -> float:
+        utility = _coerce_float(g.get_score("utility"))
+        penalty = _coerce_float(g.get_score("correlation_penalty"))
+        return utility - penalty
 
     def elite_genomes(self) -> list[ModelGenome]:
         return [self._by_id[mid] for mid in self.elite]
@@ -179,3 +320,33 @@ class ModelPopulation:
 
     def status_counts(self) -> dict[str, int]:
         return dict(Counter(g.status for g in self._by_id.values()))
+
+
+def _coerce_float(value: Any) -> float:
+    """``get_score`` may return ``None`` if no recomputer is registered; treat as 0."""
+    return float(value) if value is not None else 0.0
+
+
+def _residuals(oof: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Compute ``oof - y_target`` as a 1D vector for correlation purposes.
+
+    Handles both binary/regression (1D OOF aligned with ``y``) and multi-class
+    OOF (2D ``(n_samples, n_classes)`` against a one-hot of ``y``). Returns an
+    empty array on shape mismatch -- the caller treats that as "no signal" and
+    skips the pair.
+    """
+    if oof.ndim == 1:
+        if oof.shape[0] != y.shape[0]:
+            return np.empty(0, dtype=float)
+        return oof.astype(float) - y.astype(float)
+    if oof.ndim == 2:
+        if oof.shape[0] != y.shape[0]:
+            return np.empty(0, dtype=float)
+        n_classes = oof.shape[1]
+        y_int = y.astype(int)
+        if y_int.size == 0 or y_int.min() < 0 or y_int.max() >= n_classes:
+            return np.empty(0, dtype=float)
+        target = np.zeros_like(oof, dtype=float)
+        target[np.arange(y_int.size), y_int] = 1.0
+        return (oof.astype(float) - target).ravel()
+    return np.empty(0, dtype=float)

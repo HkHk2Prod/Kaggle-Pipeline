@@ -290,8 +290,17 @@ class KagglePipeline:
         self.controller.initialize_features(
             originals, eval_frame=self._search_features, y=self._search_y, task=task
         )
+        # Bind y on the population so individual-score recomputers (residual
+        # correlation, etc.) can run lazily when a leaderboard touches a
+        # missing score on a freshly registered genome.
+        self.controller.population.set_search_target(self._search_y)
         if resume:
             self._resume_latest()
+            # Resumed population's genomes are unpickled without their score
+            # recomputers (closures are dropped from the pickle); re-bind them
+            # against this run's population instance.
+            self.controller.population.set_search_target(self._search_y)
+            self.controller.population.wire_all_score_recomputers()
         self.log(
             f"prepared: target={target!r} task={task} scoring={scoring} | "
             f"{len(feature_cols)} features, {target_width}-class, "
@@ -351,6 +360,7 @@ class KagglePipeline:
                     level=Verbosity.DETAILED,
                 )
                 summary = self.run_batch()
+                self._apply_correlation_penalty()
                 self._last_batch = summary
                 self._record_history(summary)
                 self._refresh_submission_reserve()
@@ -708,6 +718,32 @@ class KagglePipeline:
         self._score_history.append({"batch": summary.batch, "best_score": summary.best_score})
         if self.runtime is not None:
             self._runtime_history.append({"batch": summary.batch, **self.runtime.time_summary()})
+
+    def _apply_correlation_penalty(self) -> None:
+        """Subtract a soft penalty from active models too similar to better-scoring peers.
+
+        Threshold + scale live in ``EvolutionSettings``; ``scale <= 0`` disables.
+        Operates on residual errors (``oof - y``) so anti-correlated mistakes
+        (helpful in a blend) get no penalty. Reapplied every batch so a model's
+        penalty drops to 0 when a better peer is removed or its score climbs.
+        """
+        if not self.controller or self._search_y is None:
+            return
+        ev = self.controller.population.settings
+        scale = ev.correlation_penalty_scale
+        if scale <= 0.0:
+            return
+        affected = self.controller.population.compute_correlation_penalties(
+            self._search_y,
+            threshold=ev.correlation_penalty_threshold,
+            scale=scale,
+        )
+        if affected:
+            self.log(
+                f"correlation penalty: {affected} active model(s) "
+                f"penalized for residual |r| > {ev.correlation_penalty_threshold:.3f}",
+                level=Verbosity.NORMAL,
+            )
 
     def _refresh_submission_reserve(self) -> None:
         """Update the runtime's submission reserve from measured timings.

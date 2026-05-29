@@ -40,10 +40,34 @@ def abs_correlation(a: np.ndarray, b: np.ndarray) -> float | None:
     ``a``/``b`` come from :func:`standardize_for_correlation`; their dot product
     divided by length is the correlation.
     """
+    corr = pearson_correlation(a, b)
+    return abs(corr) if corr is not None else None
+
+
+def pearson_correlation(a: np.ndarray, b: np.ndarray) -> float | None:
+    """Signed Pearson ``r`` of two standardized vectors, or ``None`` if undefined.
+
+    Same primitive as :func:`abs_correlation` but preserves sign -- needed when
+    direction matters (e.g. residual-error correlation: anti-correlated errors
+    are *helpful* in a blend and should not be penalised).
+    """
     if a.size == 0 or a.size != b.size:
         return None
     corr = float(np.dot(a, b) / a.size)
-    return abs(corr) if np.isfinite(corr) else None
+    return corr if np.isfinite(corr) else None
+
+
+def small_sample_adjusted_correlation(r: float, n: int) -> float:
+    """Olkin-Pratt unbiased estimate of the population correlation from sample ``r``.
+
+    Sample ``r`` is biased toward 0 (``E[r] ≈ ρ − ρ(1−ρ²)/(2(N−1))``); this lifts
+    ``|r|`` toward the true ``|ρ|``. For large ``n`` the correction is microscopic;
+    at small ``n`` it appreciably tightens the estimate. Falls back to ``r``
+    unchanged when ``n`` is too small for the formula to be defined.
+    """
+    if n <= 3 or not np.isfinite(r):
+        return r
+    return r * (1.0 + (1.0 - r * r) / (2.0 * (n - 3)))
 
 
 def is_missing(value: Any) -> bool:
