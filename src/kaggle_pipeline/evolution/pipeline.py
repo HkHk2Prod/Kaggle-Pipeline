@@ -33,11 +33,38 @@ from kaggle_pipeline.evolution.ecosystem.serialization import EcosystemSerialize
 from kaggle_pipeline.evolution.ecosystem.state import EcosystemState
 from kaggle_pipeline.evolution.ecosystem.summary import build_ecosystem_summary, format_summary
 from kaggle_pipeline.evolution.ensemble.manager import EnsembleManager, EnsembleResult
-from kaggle_pipeline.evolution.features.recipe import CATEGORICAL, NUMERIC
-from kaggle_pipeline.evolution.logging_utils import Verbosity, configure_logging
+from kaggle_pipeline.evolution.logging_utils import (
+    Verbosity,
+    configure_logging,
+    format_batch_banner,
+    format_phase_banner,
+)
 from kaggle_pipeline.evolution.models.parameter_spaces import build_default_families
+from kaggle_pipeline.evolution.pipeline_log import (
+    log_feature_generation,
+    log_runtime_budget,
+)
+from kaggle_pipeline.evolution.prepare import (
+    autodetect_problem,
+    build_search_sample,
+    engineer_features,
+    infer_feature_type,
+)
 from kaggle_pipeline.evolution.runtime import RuntimeManager
+from kaggle_pipeline.evolution.runtime_estimator import RuntimeEstimator
 from kaggle_pipeline.evolution.scheduler import TaskScheduler
+from kaggle_pipeline.evolution.state_io import (
+    build_ecosystem_state,
+    check_pipeline_version,
+    format_loaded_ecosystem,
+    pick_resume_serializer,
+    rebuild_controller_from_state,
+)
+from kaggle_pipeline.evolution.submission import (
+    SubmissionWriter,
+    submission_skip_reason,
+    submission_summary_lines,
+)
 from kaggle_pipeline.evolution.utils.logging import get_logger
 from kaggle_pipeline.scoring.metrics import resolve_scoring
 
@@ -129,6 +156,19 @@ class KagglePipeline:
         else:
             logger.info(message)
 
+    def _log_phase(self, name: str) -> None:
+        """Emit a banner marking a top-level phase boundary.
+
+        Banners go through SUMMARY so they're visible on any non-silent run --
+        they're the only structural cue that tells "preparation done, training
+        starting" apart from the per-batch lines.
+        """
+        self.log(format_phase_banner(name), level=Verbosity.SUMMARY)
+
+    def _log_batch_separator(self, batch: int, *, end: bool = False) -> None:
+        """Emit a separator line bracketing a batch's logs."""
+        self.log(format_batch_banner(batch, end=end), level=Verbosity.SUMMARY)
+
     # --- fit / run ----------------------------------------------------------
     def fit(
         self,
@@ -185,17 +225,16 @@ class KagglePipeline:
         feature_types,
         resume,
     ) -> None:
+        self._log_phase("preparation")
         self._id_col = id_col
-        # 1) Autodetect target/task/scoring/prediction_aim on the RAW frame (before
-        #    engineering, so the "last non-id column" target heuristic is not fooled
-        #    by new columns).
-        target, task, scoring, self._prediction_aim = self._autodetect(
+        # Autodetect on the RAW frame (before engineering, so the "last non-id
+        # column" target heuristic is not fooled by new columns).
+        target, task, scoring, self._prediction_aim = autodetect_problem(
             train_df, target, task, scoring, prediction_aim, id_col
         )
         self._task = task
 
-        # 2) Feature engineering: df.eval expressions add columns; no encodings.
-        train_eng = self._engineer(train_df, feature_expressions)
+        train_eng = engineer_features(train_df, feature_expressions)
         drop = [c for c in (target, id_col) if c in train_eng.columns]
         self._train_features = train_eng.drop(columns=drop)
         feature_cols = list(self._train_features.columns)
@@ -216,20 +255,31 @@ class KagglePipeline:
         )
 
         if test_df is not None:
-            test_eng = self._engineer(test_df, feature_expressions)
+            test_eng = engineer_features(test_df, feature_expressions)
             self._test_has_ids = id_col in test_eng.columns
             self._test_ids = (
                 test_eng[id_col].to_numpy() if self._test_has_ids else np.arange(len(test_eng))
             )
             self._test_features = test_eng.drop(columns=[id_col], errors="ignore")
 
-        # 3) Search subsample: train/score on a random fraction during the search;
-        #    ensemble winners are refit on the full data at finalization.
-        self._search_features, self._search_y = self._build_search_sample(
-            self._train_features, self._y, task
+        self._search_features, self._search_y, used_subsample = build_search_sample(
+            self._train_features,
+            self._y,
+            task,
+            fraction=self.settings.search_sample_fraction,
+            cv_splits=self.settings.cv_splits,
+            seed=self.settings.seed,
         )
+        if not used_subsample and 0.0 < self.settings.search_sample_fraction < 1.0:
+            self.log(
+                f"search subsample skipped (n={len(self._train_features)}, "
+                f"frac={self.settings.search_sample_fraction}); using full data",
+                level=Verbosity.NORMAL,
+            )
 
-        originals = [(c, self._infer_type(c, feature_types)) for c in feature_cols]
+        originals = [
+            (c, infer_feature_type(c, self._train_features, feature_types)) for c in feature_cols
+        ]
         evo_settings = self.settings.evolution_settings()
         self.controller = EvolutionController(
             evo_settings,
@@ -249,63 +299,10 @@ class KagglePipeline:
             level=Verbosity.NORMAL,
         )
 
-    def _autodetect(self, train_df, target, task, scoring, prediction_aim, id_col):
-        """Fill target/task/scoring/prediction_aim left as None (v1 autodetect rules)."""
-        from kaggle_pipeline.config import Config
-        from kaggle_pipeline.data.autodetect import resolve_problem_definition
-
-        cfg = Config(
-            target=[target] if target else None,
-            id_col=[id_col],
-            task=task,
-            scoring=scoring,
-            prediction_aim=prediction_aim,
+    def _estimator(self) -> RuntimeEstimator:
+        return RuntimeEstimator(
+            self.settings, self.controller, model_workers=self.scheduler.model_workers
         )
-        resolve_problem_definition(cfg, train_df)
-        return cfg.target[0], cfg.task, cfg.scoring, cfg.prediction_aim
-
-    def _engineer(self, df: pd.DataFrame, feature_expressions: list[str] | None) -> pd.DataFrame:
-        """Apply ``df.eval`` feature expressions (no encodings)."""
-        if not feature_expressions:
-            return df
-        from kaggle_pipeline.preprocessing.transformers import FeatureEngineer
-
-        return FeatureEngineer(expressions=feature_expressions).fit_transform(df.copy())
-
-    def _build_search_sample(self, features: pd.DataFrame, y: np.ndarray, task: str):
-        """Return a (stratified) random subsample for the search, or the full data."""
-        frac = self.settings.search_sample_fraction
-        n = len(features)
-        if not (0.0 < frac < 1.0):
-            return features, y
-        n_sample = int(round(n * frac))
-        min_rows = max(2 * self.settings.cv_splits, 30)
-        if n_sample < min_rows or n_sample >= n:
-            self.log(
-                f"search subsample skipped (n={n}, frac={frac}); using full data",
-                level=Verbosity.NORMAL,
-            )
-            return features, y
-        from sklearn.model_selection import train_test_split
-
-        stratify = y if task == "classification" else None
-        seed = self.settings.seed
-        try:
-            idx, _ = train_test_split(
-                np.arange(n), train_size=n_sample, random_state=seed, stratify=stratify
-            )
-        except ValueError:  # a class too rare to stratify -- sample without it
-            idx, _ = train_test_split(np.arange(n), train_size=n_sample, random_state=seed)
-        idx = np.sort(idx)
-        sampled = features.iloc[idx].reset_index(drop=True)
-        return sampled, np.asarray(y)[idx]
-
-    def _infer_type(self, column: str, feature_types: dict[str, str] | None) -> str:
-        if feature_types and column in feature_types:
-            return feature_types[column]
-        assert self._train_features is not None
-        series = self._train_features[column]
-        return NUMERIC if pd.api.types.is_numeric_dtype(series) else CATEGORICAL
 
     def run(self) -> dict[str, Any]:
         """Run the batch loop under the runtime budget, then finalize."""
@@ -330,14 +327,14 @@ class KagglePipeline:
             enable_ensembling=self.settings.enable_ensembling,
         )
         self._last_checkpoint_time = time.monotonic()
-        self.log("training started", level=Verbosity.NORMAL)
-        self._log_runtime_budget()
+        self._log_phase("training")
+        log_runtime_budget(self.log, runtime=self.runtime, settings=self.settings)
         try:
             while not self.runtime.should_stop_training():
                 # Always run at least one batch so a fresh run makes progress before
                 # any timing history exists; afterwards gate on the estimate.
                 first_batch = self.controller.registry.current_batch == 0
-                batch_estimate = self._estimated_batch_seconds()
+                batch_estimate = self._estimator().batch_seconds()
                 if not first_batch and not self.runtime.can_start_batch(batch_estimate):
                     self.log(
                         f"stopping: not enough time for another batch "
@@ -346,6 +343,8 @@ class KagglePipeline:
                         level=Verbosity.NORMAL,
                     )
                     break
+                next_batch = self.controller.registry.current_batch + 1
+                self._log_batch_separator(next_batch)
                 self.log(
                     f"batch start: estimate={batch_estimate:.0f}s, "
                     f"remaining_training={self.runtime.remaining_training_seconds():.0f}s",
@@ -358,7 +357,9 @@ class KagglePipeline:
                 if self.settings.checkpoint_every_batch:
                     self.checkpoint(reason="batch_complete")
                 self.print_state()
+                self._log_batch_separator(summary.batch, end=True)
             self.checkpoint(reason="training_finished")
+            self._log_phase("finalization")
             self._finalize()
             self._maybe_make_submission()
             self.checkpoint(reason="final")
@@ -375,6 +376,7 @@ class KagglePipeline:
         controller, scoring_ctx, y, train = self._require_ready()
         assert self.runtime is not None
         runtime = self.runtime
+        estimator = self._estimator()
         summary = controller.run_batch(
             train_frame=train,
             scoring_ctx=cast(Any, scoring_ctx),
@@ -383,43 +385,17 @@ class KagglePipeline:
             task=self._task,
             promote=True,
             executor=self.scheduler.model_pool(),
-            should_continue=lambda rt=runtime: rt.can_start_model_training(
-                self._estimated_model_seconds()
+            should_continue=lambda rt=runtime, est=estimator: rt.can_start_model_training(
+                est.model_seconds()
             ),
         )
-        self._log_feature_generation(summary)
-        return summary
-
-    def _log_feature_generation(self, summary: BatchSummary) -> None:
-        """Report newly generated feature columns, scaled by verbosity.
-
-        SUMMARY+: a one-line count; DETAILED+: the new column names; DEBUG: the
-        names with their depth so deeper (costlier) compositions are visible.
-        """
-        names = summary.generated_feature_names
-        if not names:
-            return
-        self.log(
-            f"features: +{len(names)} new ({summary.n_features_active} active)",
-            level=Verbosity.SUMMARY,
+        log_feature_generation(
+            self.log,
+            summary,
+            controller=self.controller,
+            verbosity=self.settings.verbosity,
         )
-        self.log("  new feature columns: " + ", ".join(names), level=Verbosity.DETAILED)
-        if self.settings.verbosity >= Verbosity.DEBUG and self.controller is not None:
-            detail = []
-            for name in names:
-                feature = self._feature_by_name(name)
-                if feature is not None:
-                    detail.append(f"{name}(depth={feature.depth}, util={feature.utility:.3f})")
-            if detail:
-                self.log("  new feature detail: " + "; ".join(detail), level=Verbosity.DEBUG)
-
-    def _feature_by_name(self, human_name: str):
-        if self.controller is None:
-            return None
-        for feature in self.controller.registry.all_features():
-            if feature.human_name == human_name:
-                return feature
-        return None
+        return summary
 
     def _require_ready(self):
         """Return ``(controller, scoring_ctx, search_y, search_features)``.
@@ -454,30 +430,22 @@ class KagglePipeline:
     def _maybe_make_submission(self) -> Path | None:
         """Write ``submission.csv`` from inside ``run()`` when the flag is set.
 
-        Refits each ensemble member on the FULL train data, predicts test, and
-        writes the CSV. Skipped (with a log line) when the flag is off, when no
-        test data was passed to ``fit``, or when the run is already past the
-        reserved submission window. Errors are caught: a failed auto-submission
-        must not bring down a run whose checkpoint already exists.
+        Skipped (with a log line) when the flag is off, when no test data was
+        passed to ``fit``, or when the run is already past the reserved
+        submission window. Errors are caught: a failed auto-submission must
+        not bring down a run whose checkpoint already exists.
         """
-        if not self.settings.make_submission_on_run:
-            return None
-        if self._test_features is None:
-            self.log(
-                "make_submission_on_run set but no test data was given to fit(); skipping",
-                level=Verbosity.SUMMARY,
-            )
-            return None
-        if self.runtime is not None and not self.runtime.has_time_for_submission():
-            remaining = self.runtime.remaining_submission_seconds()
-            reserve = self.runtime.submission_time_reserve_seconds
-            self.log(
-                f"not enough time for submission within the reserved window; skipping "
-                f"(remaining={remaining:.0f}s, estimate={reserve:.0f}s)",
-                level=Verbosity.SUMMARY,
-            )
+        skip = submission_skip_reason(
+            make_submission_on_run=self.settings.make_submission_on_run,
+            has_test_features=self._test_features is not None,
+            runtime=self.runtime,
+        )
+        if skip is not None:
+            if skip:
+                self.log(skip, level=Verbosity.SUMMARY)
             return None
         try:
+            self._log_phase("submission")
             self.log(
                 f"writing submission (reserve={self.runtime.submission_time_reserve_seconds:.0f}s, "
                 f"remaining={self.runtime.remaining_submission_seconds():.0f}s)"
@@ -539,6 +507,16 @@ class KagglePipeline:
             seed=self.settings.seed,
         )
 
+    def _submission_writer(self) -> SubmissionWriter:
+        return SubmissionWriter(
+            task=self._task,
+            classes=self._classes,
+            prediction_aim=self._prediction_aim,
+            id_col=self._id_col,
+            test_ids=self._test_ids,
+            test_has_ids=self._test_has_ids,
+        )
+
     def make_submission(
         self,
         path: str | Path = "submission.csv",
@@ -556,85 +534,47 @@ class KagglePipeline:
         """
         predictions = self.predict()
         sample = sample_df if sample_df is not None else self._sample
-        if sample is not None:
-            frame = self._submission_from_sample(sample, predictions)
-        else:
-            frame = self._submission_fallback(predictions, target_col)
+        frame = self._submission_writer().build_frame(predictions, sample, target_col=target_col)
         out = Path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
         frame.to_csv(out, index=False)
         self.log(
             f"submission written to {out} (columns {list(frame.columns)})", level=Verbosity.NORMAL
         )
+        self._log_submission_summary(out, frame, predictions)
         return out
 
-    def _submission_from_sample(
-        self, sample: pd.DataFrame, predictions: np.ndarray
-    ) -> pd.DataFrame:
-        """Build a submission matching the sample_submission's columns/structure.
+    def _log_submission_summary(
+        self, path: Path, frame: pd.DataFrame, predictions: np.ndarray
+    ) -> None:
+        """Print the submission's OOF score, error and ensemble composition.
 
-        ``predictions`` are in test-row order (the order of ``self._test_ids``).
-        The sample submission is *not* guaranteed to share that order, so rows are
-        matched to the sample on the id column rather than by position -- aligning
-        by position silently scrambles every prediction whenever the two files are
-        sorted differently. The id sets are asserted equal first so a mismatch
-        fails loudly instead of yielding a submission full of nulls, and the
-        sample's column order is preserved. When the test set carried no id column
-        there is nothing to join on, so we fall back to positional alignment.
+        Goes at SUMMARY so the headline numbers stay visible at low verbosity;
+        a per-member breakdown is added at NORMAL+ so the user always sees what
+        actually shipped without forcing DEBUG-level chatter for the rest of
+        the run.
         """
-        columns = list(sample.columns)
-        id_col = self._id_col if self._id_col in columns else columns[0]
-        target_cols = [c for c in columns if c != id_col]
-        proba = np.asarray(predictions, dtype=float)
+        lookup = None
+        if self.controller is not None:
+            population = self.controller.population
 
-        # Tag the predictions with the test ids (same row order as ``proba``),
-        # coercing the ids back to the sample's dtype so the join matches.
-        preds = pd.DataFrame({id_col: np.asarray(self._test_ids)})
-        if self._test_has_ids:
-            preds[id_col] = preds[id_col].astype(sample[id_col].dtype)
-        if len(target_cols) == 1:
-            preds[target_cols[0]] = self._decode_single(proba)
-        else:
-            # One probability column per class (sample order assumed = class order).
-            matrix = proba if proba.ndim == 2 else proba.reshape(-1, 1)
-            for i, col in enumerate(target_cols):
-                preds[col] = matrix[:, i] if i < matrix.shape[1] else 0.0
+            def lookup(mid: str, _pop=population):
+                try:
+                    return _pop.get(mid)
+                except KeyError:
+                    return None
 
-        if not self._test_has_ids:
-            return preds[columns]  # no real ids to align on; keep test order
-
-        sample_ids = set(sample[id_col].tolist())
-        pred_ids = set(preds[id_col].tolist())
-        if sample_ids != pred_ids:
-            raise ValueError(
-                f"Test ids and sample-submission ids do not match on {id_col!r}: "
-                f"{len(pred_ids)} test id(s) vs {len(sample_ids)} sample id(s), "
-                f"{len(pred_ids & sample_ids)} in common. Cannot build a submission."
-            )
-        result = sample.drop(columns=target_cols).merge(preds, on=id_col, how="left")
-        if len(result) != len(sample):
-            raise ValueError(
-                f"Joining predictions on {id_col!r} changed the row count "
-                f"({len(sample)} -> {len(result)}); the id column is not unique."
-            )
-        return result[columns]  # preserve the sample's column order
-
-    def _decode_single(self, proba: np.ndarray) -> np.ndarray:
-        """Decode predictions into one submission column per ``prediction_aim``."""
-        if self._task != "classification" or self._classes is None:
-            return proba.ravel()
-        if self._prediction_aim == "category":
-            return self._classes[proba.argmax(axis=1)] if proba.ndim == 2 else proba.ravel()
-        # probability
-        if proba.ndim == 2 and proba.shape[1] == 2:
-            return proba[:, 1]  # positive class
-        if proba.ndim == 2:
-            return self._classes[proba.argmax(axis=1)]  # multiclass single-col: best-effort label
-        return proba.ravel()
-
-    def _submission_fallback(self, predictions: np.ndarray, target_col: str) -> pd.DataFrame:
-        decoded = self._decode_single(np.asarray(predictions, dtype=float))
-        return pd.DataFrame({self._id_col: self._test_ids, target_col: np.asarray(decoded).ravel()})
+        lines, composition = submission_summary_lines(
+            path,
+            frame,
+            predictions,
+            ensemble_result=self.ensemble_result,
+            population_lookup=lookup,
+        )
+        for message, level in lines:
+            self.log(message, level=level)
+        if composition is not None:
+            self.log(composition, level=Verbosity.NORMAL)
 
     # --- state --------------------------------------------------------------
     def summarize_state(self) -> dict[str, Any]:
@@ -660,17 +600,12 @@ class KagglePipeline:
 
     def _ecosystem_state(self) -> EcosystemState:
         assert self.controller is not None
-        rng_state = dict(self.controller.rng.bit_generator.state)
-        return EcosystemState(
-            config_snapshot=self._config_snapshot(),
-            batch_index=self.controller.registry.current_batch,
-            registry=self.controller.registry,
-            population=self.controller.population,
-            oof_store=self.controller.oof_store,
-            rng_state=rng_state,
-            score_history=list(self._score_history),
-            runtime_history=list(self._runtime_history),
-            ensemble_state=self.ensemble_result.to_serializable() if self.ensemble_result else None,
+        return build_ecosystem_state(
+            self.controller,
+            self.settings,
+            ensemble_result=self.ensemble_result,
+            score_history=self._score_history,
+            runtime_history=self._runtime_history,
         )
 
     def save_state(self, path: str | Path | None = None, *, reason: str | None = None) -> Path:
@@ -691,53 +626,74 @@ class KagglePipeline:
         self.log(f"checkpoint saved ({reason}) -> {out}", level=Verbosity.NORMAL)
         return out
 
-    def load_state(self, path: str | Path | None = None, *, strict: bool = False) -> EcosystemState:
-        """Load a saved ecosystem state and rebuild the controller around it."""
-        state = self.serializer.load(path)
-        from kaggle_pipeline.evolution.ecosystem.state import PIPELINE_VERSION
+    def load_state(
+        self,
+        path: str | Path | None = None,
+        *,
+        strict: bool = False,
+        serializer: EcosystemSerializer | None = None,
+    ) -> EcosystemState:
+        """Load a saved ecosystem state and rebuild the controller around it.
 
-        if state.pipeline_version != PIPELINE_VERSION:
-            message = f"checkpoint pipeline_version {state.pipeline_version} != {PIPELINE_VERSION}"
-            if strict:
-                raise ValueError(message)
-            logger.warning(message)
+        ``serializer`` overrides the default (local ``state_dir``) loader -- used
+        for warm-starting from a previous run's directory while continuing to
+        write new checkpoints into ``self.serializer``'s local dir.
+        """
+        state = (serializer or self.serializer).load(path)
+        mismatch = check_pipeline_version(state, strict=strict)
+        if mismatch:
+            logger.warning(mismatch)
 
-        evo_settings = self.settings.evolution_settings()
-        self.controller = EvolutionController(
-            evo_settings,
-            registry=state.registry,
-            population=state.population,
+        self.controller = rebuild_controller_from_state(
+            state,
+            settings=self.settings,
             families=self.families,
             n_splits=self.settings.cv_splits,
             seed=self.settings.seed,
         )
-        self.controller.oof_store = state.oof_store
-        if state.rng_state is not None:
-            self.controller.rng.bit_generator.state = state.rng_state
         self._score_history = list(state.score_history)
         self._runtime_history = list(state.runtime_history)
         self.log(
             f"restored state: batch={state.batch_index}, "
             f"{len(state.population.all_genomes())} models",
-            level=Verbosity.NORMAL,
+            level=Verbosity.SUMMARY,
         )
+        self._log_loaded_ecosystem(state)
         return state
+
+    def _log_loaded_ecosystem(self, state: EcosystemState) -> None:
+        """Print the full ecosystem summary right after restoring from a checkpoint."""
+        if self.settings.verbosity <= Verbosity.SILENT or self.controller is None:
+            return
+        text = format_loaded_ecosystem(
+            self.controller, self.runtime, state, self.settings.verbosity
+        )
+        if text:
+            logger.info("loaded ecosystem state\n%s", text)
 
     def restore_from_checkpoint(self, path: str | Path) -> EcosystemState:
         return self.load_state(path)
 
     def _resume_latest(self) -> None:
         """Merge the latest saved population/registry into the prepared controller."""
-        if self.serializer.latest_path() is None or self.controller is None:
+        if self.controller is None:
+            return
+        load_serializer = pick_resume_serializer(self.serializer, self.settings)
+        if load_serializer is None:
             self.log(
                 "resume requested but no checkpoint found; starting fresh", level=Verbosity.SUMMARY
             )
             return
+        if load_serializer is not self.serializer:
+            self.log(
+                f"resuming from previous run at {load_serializer.state_dir}",
+                level=Verbosity.NORMAL,
+            )
         assert self.controller._eval_context is not None and self.controller._eval_y is not None
         eval_frame = self.controller._eval_context.frame
         eval_y = self.controller._eval_y
         task = self.controller._task
-        self.load_state()
+        self.load_state(serializer=load_serializer)
         assert self.controller is not None
         # Re-attach the feature evaluation context to the restored registry.
         self.controller.initialize_features([], eval_frame=eval_frame, y=eval_y, task=task)
@@ -753,47 +709,6 @@ class KagglePipeline:
         if self.runtime is not None:
             self._runtime_history.append({"batch": summary.batch, **self.runtime.time_summary()})
 
-    def _completed_compute_times(self) -> list[float]:
-        if self.controller is None:
-            return []
-        return [
-            g.score_set.compute_time
-            for g in self.controller.population.completed()
-            if g.score_set is not None and g.score_set.compute_time > 0
-        ]
-
-    def _estimated_model_seconds(self) -> float:
-        times = self._completed_compute_times()
-        if times:
-            # Slight safety factor over the observed median.
-            return float(np.median(times)) * 1.2
-        return 5.0  # optimistic bootstrap before any timing history exists
-
-    def _estimated_batch_seconds(self) -> float:
-        per_model = self._estimated_model_seconds()
-        workers = max(1, self.scheduler.model_workers)
-        return (self.settings.models_per_batch * per_model) / workers + 5.0
-
-    def _estimated_submission_seconds(self) -> float:
-        """Estimate make_submission cost from measured per-model search times.
-
-        Each ensemble member is refit on the FULL training data, so its refit
-        cost is roughly the median search-time per model scaled by
-        ``1 / search_sample_fraction`` (linear in row count for the trees and
-        gradient boosters we use). The submission step refits up to
-        ``ensemble_max_models`` members and predicts test. A 1.3x safety
-        multiplier over the median keeps the estimate conservative; CSV write
-        is microseconds and not worth modelling. Falls back to the bootstrap
-        default when there is no timing history yet.
-        """
-        times = self._completed_compute_times()
-        if not times:
-            return self.settings.submission_time_reserve_seconds
-        median_search = float(np.median(times))
-        scale_full = 1.0 / max(0.01, self.settings.search_sample_fraction)
-        per_refit = median_search * scale_full * 1.3
-        return per_refit * self.settings.ensemble_max_models
-
     def _refresh_submission_reserve(self) -> None:
         """Update the runtime's submission reserve from measured timings.
 
@@ -804,38 +719,22 @@ class KagglePipeline:
         """
         if not (self.runtime and self.settings.make_submission_on_run):
             return
+        estimator = self._estimator()
         previous = self.runtime.submission_time_reserve_seconds
-        updated = self._estimated_submission_seconds()
+        updated = estimator.submission_seconds()
         self.runtime.submission_time_reserve_seconds = updated
         # Only emit when the value actually changed -- repeating the same number
         # every batch is noise.
         if abs(updated - previous) > 1.0:
+            times = estimator.completed_compute_times()
+            median = float(np.median(times)) if times else 0.0
             self.log(
                 f"submission reserve refined: {previous:.0f}s -> {updated:.0f}s "
-                f"(median model={float(np.median(self._completed_compute_times())):.2f}s, "
+                f"(median model={median:.2f}s, "
                 f"n_members={self.settings.ensemble_max_models}, "
                 f"scale_full={1.0 / max(0.01, self.settings.search_sample_fraction):.1f}x)",
                 level=Verbosity.DETAILED,
             )
-
-    def _log_runtime_budget(self) -> None:
-        """Print the carved-up runtime budget at DETAILED+ so reserves are visible."""
-        if self.runtime is None or self.settings.verbosity < Verbosity.DETAILED:
-            return
-        total = self.settings.max_runtime_seconds
-        sub_reserve = self.runtime.submission_time_reserve_seconds
-        self.log(
-            f"runtime budget: total={total:.0f}s, "
-            f"safety={self.settings.safety_margin_seconds:.0f}s, "
-            f"checkpoint={self.settings.checkpoint_time_reserve_seconds:.0f}s, "
-            f"finalization={self.settings.finalization_time_reserve_seconds:.0f}s, "
-            f"ensemble={self.settings.ensemble_time_reserve_seconds:.0f}s"
-            f"{' (off)' if not self.settings.enable_ensembling else ''}, "
-            f"submission={sub_reserve:.0f}s"
-            f"{' (off)' if not self.settings.make_submission_on_run else ' (bootstrap)'}, "
-            f"training_window={self.runtime.remaining_training_seconds():.0f}s",
-            level=Verbosity.DETAILED,
-        )
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Shut the thread pools down gracefully."""

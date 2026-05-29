@@ -53,6 +53,13 @@ class KagglePipelineSettings:
 
     # --- state saving -------------------------------------------------------
     state_dir: str = "kagglepipeline_state"
+    # When ``resume=True`` is passed to ``fit``, the pipeline loads from
+    # ``state_dir`` if it already holds a checkpoint, else falls back to
+    # ``previous_state_dir`` if set, else (on Kaggle) auto-scans
+    # ``/kaggle/input/*/<state_dir basename>/checkpoints/`` for the newest
+    # checkpoint. New checkpoints are always written to ``state_dir`` -- the
+    # previous-state dir is read-only on Kaggle.
+    previous_state_dir: str | None = None
     checkpoint_every_batch: bool = True
     checkpoint_interval_seconds: float = 10 * 60
     save_after_each_completed_model: bool = False

@@ -65,3 +65,34 @@ def format_duration(seconds: float) -> str:
     if m:
         return f"{m}m{s:02d}s"
     return f"{s}s"
+
+
+_BANNER_WIDTH = 72
+
+
+def format_phase_banner(name: str) -> str:
+    """Render a full-width banner marking a global phase boundary.
+
+    Phases (preparation / training / finalization / submission) are the top-
+    level beats of a run; using a dedicated banner makes them stand out from
+    the per-batch chatter even at low verbosity.
+    """
+    label = f" PHASE: {name.upper()} "
+    pad = max(0, _BANNER_WIDTH - len(label))
+    left = pad // 2
+    right = pad - left
+    bar = "=" * _BANNER_WIDTH
+    return f"\n{bar}\n{'=' * left}{label}{'=' * right}\n{bar}"
+
+
+def format_batch_banner(batch: int, *, end: bool = False) -> str:
+    """Render a separator line marking the start (or end) of a batch.
+
+    Visible at SUMMARY+ so the per-batch boundaries are easy to spot when
+    scrolling through long runs.
+    """
+    label = f" batch {batch} end " if end else f" batch {batch} "
+    pad = max(0, _BANNER_WIDTH - len(label))
+    left = pad // 2
+    right = pad - left
+    return f"{'-' * left}{label}{'-' * right}"

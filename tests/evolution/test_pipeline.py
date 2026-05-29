@@ -11,6 +11,17 @@ from kaggle_pipeline.evolution import KagglePipeline, KagglePipelineSettings
 from kaggle_pipeline.evolution.ecosystem.summary import format_summary
 from kaggle_pipeline.evolution.logging_utils import Verbosity
 from kaggle_pipeline.evolution.models.parameter_spaces import build_default_families
+from kaggle_pipeline.logconfig import configure_logging as _configure_logging
+
+
+def _force_log_handler_to_current_stdout(level: int) -> None:
+    """Re-attach the package logger's handler to whichever sys.stdout is active.
+
+    ``configure_logging`` is idempotent and captures the value of ``sys.stdout``
+    at first use. capsys swaps stdout per test, so the cached handler emits to
+    the original (uncaptured) stream unless we force a reset here.
+    """
+    _configure_logging(level, force=True)
 
 
 def _data(n: int = 240):
@@ -251,3 +262,70 @@ def test_ensembling_can_be_disabled(tmp_path):
         assert pipeline.best_genome() is not None
     finally:
         pipeline.shutdown()
+
+
+def test_run_emits_phase_and_batch_banners(tmp_path, capsys):
+    # The user-facing log stream should clearly mark each top-level phase
+    # ("PHASE: PREPARATION", "PHASE: TRAINING", "PHASE: FINALIZATION") and
+    # bracket every batch with a "batch N" separator -- otherwise a long run
+    # collapses into an undifferentiated wall of text. The package logger
+    # writes directly to stdout (propagate=False) so the test reads from capsys.
+    warnings.simplefilter("ignore")
+    train, _ = _data()
+    pipeline = _fast_pipeline(tmp_path, verbosity=Verbosity.SUMMARY)
+    _force_log_handler_to_current_stdout(pipeline.settings.verbosity)
+    try:
+        pipeline.fit(train, target="target", scoring="roc_auc", id_col="id")
+    finally:
+        pipeline.shutdown()
+    text = capsys.readouterr().out
+    assert "PHASE: PREPARATION" in text
+    assert "PHASE: TRAINING" in text
+    assert "PHASE: FINALIZATION" in text
+    # At least one batch ran and its banner shows up.
+    assert "batch 1" in text
+
+
+def test_make_submission_logs_ensemble_composition(tmp_path, capsys):
+    # After writing the CSV the pipeline summarises what was actually shipped:
+    # ensemble strategy + OOF score + per-member weights/families. The user
+    # asked for the submission's composition to appear in the log.
+    warnings.simplefilter("ignore")
+    train, test = _data()
+    pipeline = _fast_pipeline(tmp_path, verbosity=Verbosity.NORMAL)
+    _force_log_handler_to_current_stdout(pipeline.settings.verbosity)
+    try:
+        pipeline.fit(train, target="target", test_df=test, scoring="roc_auc", id_col="id")
+        capsys.readouterr()  # drop the fit() output; we only care about make_submission
+        pipeline.make_submission(tmp_path / "submission.csv")
+        text = capsys.readouterr().out
+        result = pipeline.ensemble_result
+    finally:
+        pipeline.shutdown()
+    assert "submission summary" in text
+    assert "ensemble:" in text
+    if result is not None and result.member_ids:
+        assert "ensemble composition" in text
+
+
+def test_load_state_logs_ecosystem_summary(tmp_path, capsys):
+    # Resuming from a checkpoint should print a snapshot of what was loaded so
+    # the user sees the population/feature counts before training continues.
+    warnings.simplefilter("ignore")
+    train, _ = _data()
+    pipeline = _fast_pipeline(tmp_path)
+    try:
+        pipeline.fit(train, target="target", scoring="roc_auc", id_col="id")
+    finally:
+        pipeline.shutdown()
+
+    resumed = _fast_pipeline(tmp_path, verbosity=Verbosity.NORMAL)
+    _force_log_handler_to_current_stdout(resumed.settings.verbosity)
+    try:
+        capsys.readouterr()  # drop the construction output
+        resumed.load_state()
+        text = capsys.readouterr().out
+    finally:
+        resumed.shutdown()
+    assert "loaded ecosystem state" in text
+    assert "restored state" in text
