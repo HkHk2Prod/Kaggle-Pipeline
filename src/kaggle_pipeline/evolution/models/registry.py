@@ -23,11 +23,6 @@ from kaggle_pipeline.evolution.models.genome import ModelGenome
 from kaggle_pipeline.evolution.models.lifecycle import ModelStatus
 from kaggle_pipeline.evolution.models.mutation import MutationRecord
 from kaggle_pipeline.evolution.models.scoring import ModelUtility, comparable_stats
-from kaggle_pipeline.evolution.utils.arrays import (
-    pearson_correlation,
-    small_sample_adjusted_correlation,
-    standardize_for_correlation,
-)
 from kaggle_pipeline.evolution.utils.logging import get_logger
 from kaggle_pipeline.evolution.utils.random import spawn_rng
 
@@ -63,8 +58,16 @@ class ModelPopulation:
         self._search_y: np.ndarray | None = None
 
     def set_search_target(self, y: np.ndarray | None) -> None:
-        """Bind the y vector that recomputers use to derive residual penalties."""
+        """Bind the y vector that recomputers use to derive residual penalties.
+
+        Also cascades into the OOF store so its correlation cache pivots to the
+        same target (rebuilding once if the bound ``y`` is new). The two
+        signatures of "what y are we comparing residuals against" then can't
+        drift out of sync.
+        """
         self._search_y = y
+        if self.oof_store is not None:
+            self.oof_store.set_residual_target(y)
 
     # --- registration -------------------------------------------------------
     def has_genome_hash(self, genome_hash: str) -> bool:
@@ -185,15 +188,16 @@ class ModelPopulation:
         threshold: float,
         scale: float,
     ) -> int:
-        """Set each active model's ``correlation_penalty`` from residual-error correlation.
+        """Set each active model's ``correlation_penalty`` from cached residual correlations.
 
-        For every active model, find its maximum *signed* Pearson ``r`` against
-        every active model with a *strictly higher* raw ``score_set.score``,
-        applied to the residuals ``oof - y``. The penalty is
-        ``scale * max(0, max_r - threshold)``; the top scorer is never penalised
-        (no higher peers). ``r`` is Olkin-Pratt corrected for sample size.
+        For every active model, look up its largest ``|Olkin-Pratt r|`` against
+        any active model with a *strictly higher* raw ``score_set.score`` and
+        apply ``penalty = scale * max(0, max_r - threshold)``. The top scorer
+        is never penalised (no higher peers). Reads from the OOF store's
+        incremental correlation cache, so no standardization or dot products
+        run here -- the matrix was built once as each OOF was stored.
 
-        Returns the count of models that ended up with a non-zero penalty.
+        Returns the count of models with a non-zero penalty.
         """
         # Reset every active model's penalty before recomputation so a stale
         # value from a previous batch never lingers on a now-uncontested model.
@@ -203,43 +207,30 @@ class ModelPopulation:
         if self.oof_store is None or scale <= 0.0 or len(self.active) < 2:
             return 0
 
-        # Sort active models by raw score descending; ties keep registration order.
+        # Make sure the cache is bound to this ``y``. If the bound target is
+        # already this exact array, ``set_target`` is a no-op; otherwise the
+        # cache rebuilds from the stored OOFs.
+        self.oof_store.set_residual_target(y)
+        cache = self.oof_store.correlation_cache
+
         actives = [self._by_id[m] for m in self.active if self._by_id[m].score_set is not None]
         actives.sort(key=lambda g: g.score_set.score if g.score_set else 0.0, reverse=True)
 
-        # Standardize residual vectors once per model (None for missing/constant).
-        standardized: dict[str, np.ndarray] = {}
-        for g in actives:
-            oof = self.oof_store.get(g.model_id)
-            if oof is None:
-                continue
-            residuals = _residuals(oof, y)
-            if residuals.size == 0:
-                continue
-            z = standardize_for_correlation(residuals)
-            if z is not None:
-                standardized[g.model_id] = z
-
         affected = 0
         for i, g in enumerate(actives):
-            z_self = standardized.get(g.model_id)
-            if z_self is None or g.score_set is None:
+            if g.score_set is None or not cache.has(g.model_id):
                 continue
             max_r = -np.inf
             self_score = g.score_set.score
             for j in range(i):
                 other = actives[j]
                 if other.score_set is None or other.score_set.score <= self_score:
-                    # ``actives`` is sorted, so a non-greater score here means
-                    # every remaining peer is also not strictly higher.
+                    # ``actives`` is sorted, so once a peer is not strictly
+                    # higher, no later peer will be either.
                     break
-                z_other = standardized.get(other.model_id)
-                if z_other is None or z_other.size != z_self.size:
-                    continue
-                r = pearson_correlation(z_self, z_other)
+                r = cache.correlation(g.model_id, other.model_id)
                 if r is None:
                     continue
-                r = small_sample_adjusted_correlation(r, z_self.size)
                 if r > max_r:
                     max_r = r
             if not np.isfinite(max_r):
@@ -325,28 +316,3 @@ class ModelPopulation:
 def _coerce_float(value: Any) -> float:
     """``get_score`` may return ``None`` if no recomputer is registered; treat as 0."""
     return float(value) if value is not None else 0.0
-
-
-def _residuals(oof: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """Compute ``oof - y_target`` as a 1D vector for correlation purposes.
-
-    Handles both binary/regression (1D OOF aligned with ``y``) and multi-class
-    OOF (2D ``(n_samples, n_classes)`` against a one-hot of ``y``). Returns an
-    empty array on shape mismatch -- the caller treats that as "no signal" and
-    skips the pair.
-    """
-    if oof.ndim == 1:
-        if oof.shape[0] != y.shape[0]:
-            return np.empty(0, dtype=float)
-        return oof.astype(float) - y.astype(float)
-    if oof.ndim == 2:
-        if oof.shape[0] != y.shape[0]:
-            return np.empty(0, dtype=float)
-        n_classes = oof.shape[1]
-        y_int = y.astype(int)
-        if y_int.size == 0 or y_int.min() < 0 or y_int.max() >= n_classes:
-            return np.empty(0, dtype=float)
-        target = np.zeros_like(oof, dtype=float)
-        target[np.arange(y_int.size), y_int] = 1.0
-        return (oof.astype(float) - target).ravel()
-    return np.empty(0, dtype=float)
