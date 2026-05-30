@@ -708,6 +708,16 @@ A running checklist of enhancements worth exploring — contributions welcome:
   on a smaller sample of the training set to evaluate many more candidates per
   unit time, then refit only the leaderboard survivors on the full dataset before
   ensembling.
+- [ ] **Separate NN-on-GPU training cycle behind a flag.** The current MLP family
+  runs single-threaded on CPU, which is why it carries a ``max_train_rows`` cap.
+  Add an opt-in flag (e.g. ``--enable_gpu_nn``) that, after the CPU search has
+  filled the leaderboard with tree/linear/Bayesian models, kicks off a separate
+  GPU-only training cycle that trains *only* neural-net families (a PyTorch
+  family alongside or replacing sklearn's MLP). Search ranks and ensemble slots
+  decide whether the NNs make it in. This way GPU compute is reserved for the
+  one model type that actually benefits from it instead of sitting idle while
+  CPU-friendly GBMs train, and NN quality is not artificially capped by CPU
+  budget.
 
 ## Development
 

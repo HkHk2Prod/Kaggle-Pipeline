@@ -113,6 +113,122 @@ class _CountEncoder(BaseEstimator, TransformerMixin):
         return self.feature_names_in_
 
 
+_CAP_WARNED_FAMILIES: set[str] = set()
+
+
+def reset_train_size_cap_warnings() -> None:
+    """Forget which families have already logged the train-size cap warning.
+
+    Tests use this to make per-family warnings observable without relying on
+    test ordering. Production code never calls it -- one warning per family per
+    process is the intended cadence.
+    """
+    _CAP_WARNED_FAMILIES.clear()
+
+
+class _TrainSizeCappedEstimator(BaseEstimator):
+    """Wraps a final estimator to cap the number of training rows it ever sees.
+
+    Used for families whose fit time scales poorly with ``N`` (MLP single-thread,
+    KNN predict). On ``fit`` we draw a stratified subsample (random for
+    regression) of size ``max_rows`` and forward to the underlying estimator;
+    on the first cap firing per family we log a warning showing the measured
+    fit time and a linear extrapolation to the full-data cost so the user can
+    decide whether the cut was warranted. Predict-time calls pass through
+    unchanged.
+
+    Only ``__init__`` params survive a sklearn ``clone()`` (which cross-val
+    invokes per fold), so the cap-warning dedup state lives in a module-level
+    set rather than on the instance.
+    """
+
+    def __init__(
+        self,
+        estimator: Any,
+        *,
+        max_rows: int,
+        family_name: str,
+        seed: int | None = None,
+    ):
+        self.estimator = estimator
+        self.max_rows = max_rows
+        self.family_name = family_name
+        self.seed = seed
+
+    def fit(self, X: Any, y: np.ndarray) -> _TrainSizeCappedEstimator:
+        n = len(X)
+        if n <= self.max_rows:
+            self.estimator.fit(X, y)
+        else:
+            rng = np.random.default_rng(self.seed)
+            idx = _stratified_subsample_indices(y, self.max_rows, rng)
+            X_capped = X.iloc[idx] if hasattr(X, "iloc") else X[idx]
+            y_capped = y[idx]
+            t0 = perf_counter()
+            self.estimator.fit(X_capped, y_capped)
+            elapsed = perf_counter() - t0
+            # Linear extrapolation: works for the families we cap (MLP / KNN),
+            # both roughly linear in N. Users who pick a non-linear-time
+            # family should raise the cap.
+            extrapolated = elapsed * n / self.max_rows
+            if self.family_name not in _CAP_WARNED_FAMILIES:
+                logger.warning(
+                    "%s capped training data: trained on %d / %d rows; "
+                    "measured fit = %.1fs, estimated full-data fit = %.1fs. "
+                    "Raise max_train_rows for this family if the cap is too tight.",
+                    self.family_name,
+                    self.max_rows,
+                    n,
+                    elapsed,
+                    extrapolated,
+                )
+                _CAP_WARNED_FAMILIES.add(self.family_name)
+        # Expose ``classes_`` (and friends) as real attributes after fit so
+        # sklearn's ``check_is_fitted`` -- which inspects trailing-underscore
+        # attributes on the final step of a Pipeline -- treats the wrapper as
+        # fitted. Forwarding via ``__getattr__`` was not enough on sklearn 1.5+.
+        if hasattr(self.estimator, "classes_"):
+            self.classes_ = self.estimator.classes_
+        if hasattr(self.estimator, "n_features_in_"):
+            self.n_features_in_ = self.estimator.n_features_in_
+        return self
+
+    def predict(self, X: Any) -> np.ndarray:
+        return self.estimator.predict(X)
+
+    def predict_proba(self, X: Any) -> np.ndarray:
+        return self.estimator.predict_proba(X)
+
+
+def _stratified_subsample_indices(
+    y: np.ndarray, max_rows: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Indices into ``y`` selecting ~``max_rows`` rows that preserve class balance.
+
+    Plain random sampling for regression-like targets (many distinct values)
+    where stratification has no meaning; per-class allocation proportional to
+    class frequency for classification. Last class absorbs any rounding so the
+    total lands on ``max_rows`` exactly.
+    """
+    y = np.asarray(y).ravel()
+    uniq = np.unique(y)
+    if uniq.size > 100:  # treat as regression target -- no stratification
+        return rng.choice(len(y), size=max_rows, replace=False)
+    picks: list[np.ndarray] = []
+    remaining = max_rows
+    for i, cls in enumerate(uniq):
+        idx = np.where(y == cls)[0]
+        if i == uniq.size - 1:
+            take = remaining
+        else:
+            take = int(round(max_rows * len(idx) / len(y)))
+        take = min(max(take, 1), len(idx))
+        chosen = rng.choice(idx, size=take, replace=False)
+        picks.append(chosen)
+        remaining -= take
+    return np.concatenate(picks)
+
+
 class _SanitizeFeatureNames(BaseEstimator, TransformerMixin):
     """Replace LightGBM-forbidden JSON characters in DataFrame column names.
 
@@ -273,6 +389,13 @@ class ModelTrainer:
             int(resource.value) if resource else fam.n_estimators_for(genome.fidelity_level)
         )
         estimator = fam.build_estimator(params, n_estimators=n_estimators, random_state=seed)
+        if fam.max_train_rows is not None:
+            estimator = _TrainSizeCappedEstimator(
+                estimator,
+                max_rows=fam.max_train_rows,
+                family_name=fam.name,
+                seed=seed,
+            )
 
         # Dedup feature references by id: duplicates would cause LightGBM to
         # reject the matrix ("Feature ... appears more than one time") because

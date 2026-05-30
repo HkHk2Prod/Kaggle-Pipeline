@@ -372,6 +372,7 @@ class KagglePipeline:
             self._log_phase("finalization")
             self._finalize()
             self._maybe_make_submission()
+            self._log_compute_waste_summary()
             self.checkpoint(reason="final")
         except KeyboardInterrupt:  # graceful: save what we have
             logger.warning("interrupted; checkpointing before exit")
@@ -493,6 +494,8 @@ class KagglePipeline:
 
     def predict(self, test_df: pd.DataFrame | None = None) -> np.ndarray:
         """Predict test data with the ensemble (refits members on FULL train data)."""
+        from concurrent.futures import ThreadPoolExecutor
+
         controller, _, _, _ = self._require_ready()
         assert self._train_features is not None and self._y is not None
         if self.ensemble_result is None:
@@ -506,16 +509,30 @@ class KagglePipeline:
         if test is None:
             raise ValueError("no test data provided to predict()")
         manager = EnsembleManager(self.settings)
-        return manager.predict(
-            self.ensemble_result,
-            trainer=controller.trainer,
-            population=controller.population,
-            train_frame=self._train_features,  # winners refit on the full data
-            y=self._y,
-            test_frame=test,
-            task=self._task,
-            seed=self.settings.seed,
-        )
+        # Use a fresh, scoped pool for the submission refit instead of the
+        # long-running batch pool: ``make_submission`` (which calls this) is
+        # often invoked after ``run()`` 's finally block has already shut the
+        # scheduler down, and an already-shutdown pool rejects ``submit``.
+        n_workers = self.settings.resolved_model_workers()
+        if n_workers <= 1:
+            executor: Any = None
+        else:
+            executor = ThreadPoolExecutor(max_workers=n_workers, thread_name_prefix="evo-submit")
+        try:
+            return manager.predict(
+                self.ensemble_result,
+                trainer=controller.trainer,
+                population=controller.population,
+                train_frame=self._train_features,  # winners refit on the full data
+                y=self._y,
+                test_frame=test,
+                task=self._task,
+                seed=self.settings.seed,
+                executor=executor,
+            )
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
     def _submission_writer(self) -> SubmissionWriter:
         return SubmissionWriter(
@@ -718,6 +735,24 @@ class KagglePipeline:
         self._score_history.append({"batch": summary.batch, "best_score": summary.best_score})
         if self.runtime is not None:
             self._runtime_history.append({"batch": summary.batch, **self.runtime.time_summary()})
+
+    def _log_compute_waste_summary(self) -> None:
+        """Emit the per-family compute-spend breakdown at end-of-cycle.
+
+        Read-only over the population + ensemble; safe to call after any of
+        finalize / submission / interruption. Logged at ``NORMAL`` so it
+        appears on a default-verbosity run without flooding ``--quiet`` ones.
+        """
+        if not self.controller:
+            return
+        from kaggle_pipeline.evolution.ecosystem.compute_waste import (
+            build_compute_waste_summary,
+            format_compute_waste_summary,
+        )
+
+        summary = build_compute_waste_summary(self.controller.population, self.ensemble_result)
+        rendered = format_compute_waste_summary(summary)
+        self.log(rendered, level=Verbosity.NORMAL)
 
     def _apply_correlation_penalty(self) -> None:
         """Subtract a soft penalty from active models too similar to better-scoring peers.
