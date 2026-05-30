@@ -191,6 +191,7 @@ def submission_skip_reason(
     make_submission_on_run: bool,
     has_test_features: bool,
     runtime: RuntimeManager | None,
+    enforce_reserve: bool = True,
 ) -> str | None:
     """Decide whether the post-run auto-submission should be skipped.
 
@@ -198,12 +199,17 @@ def submission_skip_reason(
     message ready to be logged by the caller. The branches mirror the three
     guards the pipeline needs: feature off, no test data given to ``fit``,
     and not enough budget left within the reserved submission window.
+
+    ``enforce_reserve`` gates that last check. It is on for ordinary runs (the
+    reserve protects the submission window from the training loop overrunning),
+    but the blend-only path disables it: with no training to overrun, the whole
+    budget is the submission's, so the window check is meaningless there.
     """
     if not make_submission_on_run:
         return ""  # silent skip: the flag is simply off
     if not has_test_features:
         return "make_submission_on_run set but no test data was given to fit(); skipping"
-    if runtime is not None and not runtime.has_time_for_submission():
+    if enforce_reserve and runtime is not None and not runtime.has_time_for_submission():
         return (
             f"not enough time for submission within the reserved window; skipping "
             f"(remaining={runtime.remaining_submission_seconds():.0f}s, "

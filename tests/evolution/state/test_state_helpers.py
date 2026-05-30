@@ -13,6 +13,7 @@ from kaggle_pipeline.evolution.evaluation.oof_store import OOFStore
 from kaggle_pipeline.evolution.models.registry import ModelPopulation
 from kaggle_pipeline.evolution.state_io import (
     check_pipeline_version,
+    collect_resume_states,
     pick_resume_serializer,
 )
 
@@ -83,3 +84,42 @@ def test_pick_resume_serializer_falls_back_to_previous_when_local_empty(
     assert chosen is not None
     assert chosen is not local
     assert chosen.load().batch_index == 5
+
+
+def test_collect_resume_states_prefers_local(tmp_path, registry, settings):
+    local = EcosystemSerializer(tmp_path / "live", keep_last_n=3)
+    local.save(_state(registry, settings, batch_index=4), reason="bootstrap")
+    cfg = SimpleNamespace(
+        previous_state_dir=None,
+        state_dir=str(tmp_path / "live"),
+        keep_last_n_checkpoints=3,
+    )
+    states = collect_resume_states(local, cfg)
+    assert len(states) == 1
+    assert states[0].batch_index == 4
+
+
+def test_collect_resume_states_loads_explicit_previous(tmp_path, registry, settings):
+    previous = tmp_path / "previous"
+    EcosystemSerializer(previous, keep_last_n=3).save(
+        _state(registry, settings, batch_index=9), reason="prior"
+    )
+    local = EcosystemSerializer(tmp_path / "live", keep_last_n=3)
+    cfg = SimpleNamespace(
+        previous_state_dir=str(previous),
+        state_dir=str(tmp_path / "live"),
+        keep_last_n_checkpoints=3,
+    )
+    states = collect_resume_states(local, cfg)
+    assert len(states) == 1
+    assert states[0].batch_index == 9
+
+
+def test_collect_resume_states_empty_when_nothing(tmp_path):
+    local = EcosystemSerializer(tmp_path / "live", keep_last_n=3)
+    cfg = SimpleNamespace(
+        previous_state_dir=None,
+        state_dir=str(tmp_path / "live"),
+        keep_last_n_checkpoints=3,
+    )
+    assert collect_resume_states(local, cfg) == []

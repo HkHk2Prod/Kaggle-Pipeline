@@ -29,16 +29,19 @@ from kaggle_pipeline.evolution.controllers.evolution_controller import (
     BatchSummary,
     EvolutionController,
 )
+from kaggle_pipeline.evolution.ecosystem.merge import merge_ecosystem_states
 from kaggle_pipeline.evolution.ecosystem.serialization import EcosystemSerializer
 from kaggle_pipeline.evolution.ecosystem.state import EcosystemState
 from kaggle_pipeline.evolution.ecosystem.summary import build_ecosystem_summary, format_summary
 from kaggle_pipeline.evolution.ensemble.manager import EnsembleManager, EnsembleResult
+from kaggle_pipeline.evolution.evaluation.validation import make_cv_splits
 from kaggle_pipeline.evolution.logging_utils import (
     Verbosity,
     configure_logging,
     format_batch_banner,
     format_phase_banner,
 )
+from kaggle_pipeline.evolution.models.lifecycle import ModelStatus
 from kaggle_pipeline.evolution.models.parameter_spaces import build_default_families
 from kaggle_pipeline.evolution.pipeline_log import (
     log_feature_generation,
@@ -56,8 +59,8 @@ from kaggle_pipeline.evolution.scheduler import TaskScheduler
 from kaggle_pipeline.evolution.state_io import (
     build_ecosystem_state,
     check_pipeline_version,
+    collect_resume_states,
     format_loaded_ecosystem,
-    pick_resume_serializer,
     rebuild_controller_from_state,
 )
 from kaggle_pipeline.evolution.submission import (
@@ -146,6 +149,9 @@ class KagglePipeline:
         self._score_history: list[dict[str, Any]] = []
         self._runtime_history: list[dict[str, Any]] = []
         self._last_checkpoint_time = time.monotonic()
+        # Tripped once if a merged ecosystem's OOF had to be recomputed because
+        # its subsample didn't match this run's (see ``_ensure_oof_compatible``).
+        self._warned_oof_mismatch = False
 
     # --- logging ------------------------------------------------------------
     def log(self, message: str, *, level: int = Verbosity.NORMAL) -> None:
@@ -268,7 +274,7 @@ class KagglePipeline:
             task,
             fraction=self.settings.search_sample_fraction,
             cv_splits=self.settings.cv_splits,
-            seed=self.settings.seed,
+            seed=self.settings.search_sample_seed,
         )
         if not used_subsample and 0.0 < self.settings.search_sample_fraction < 1.0:
             self.log(
@@ -336,10 +342,18 @@ class KagglePipeline:
             enable_ensembling=self.settings.enable_ensembling,
         )
         self._last_checkpoint_time = time.monotonic()
-        self._log_phase("training")
+        if not self.settings.train_models:
+            self._log_phase("blend-only (training skipped)")
+            self.log(
+                "train_models=False: skipping the batch loop; blending merged "
+                "input ecosystems straight into a submission",
+                level=Verbosity.SUMMARY,
+            )
+        else:
+            self._log_phase("training")
         log_runtime_budget(self.log, runtime=self.runtime, settings=self.settings)
         try:
-            while not self.runtime.should_stop_training():
+            while self.settings.train_models and not self.runtime.should_stop_training():
                 # Always run at least one batch so a fresh run makes progress before
                 # any timing history exists; afterwards gate on the estimate.
                 first_batch = self.controller.registry.current_batch == 0
@@ -446,10 +460,16 @@ class KagglePipeline:
         submission window. Errors are caught: a failed auto-submission must
         not bring down a run whose checkpoint already exists.
         """
+        # Replace the bootstrap reserve with a measured estimate before the
+        # time-gate. The batch loop already refreshes it per batch, but the
+        # blend-only path (train_models=False) never enters that loop, so without
+        # this it would still carry the 30-min bootstrap and wrongly skip.
+        self._refresh_submission_reserve()
         skip = submission_skip_reason(
             make_submission_on_run=self.settings.make_submission_on_run,
             has_test_features=self._test_features is not None,
             runtime=self.runtime,
+            enforce_reserve=self.settings.train_models,
         )
         if skip is not None:
             if skip:
@@ -473,7 +493,8 @@ class KagglePipeline:
     def ensemble(self) -> EnsembleResult:
         """Build the ensemble from the current population (OOF-based)."""
         controller, scoring_ctx, y, _ = self._require_ready()
-        manager = EnsembleManager(self.settings)
+        self._ensure_oof_compatible()
+        manager = EnsembleManager(self.settings, families=self.families)
         runtime = self.runtime
         time_left = None
         if runtime is not None:
@@ -492,6 +513,61 @@ class KagglePipeline:
         )
         return self.ensemble_result
 
+    def _ensure_oof_compatible(self) -> None:
+        """Recompute merged OOF that doesn't match this run's search subsample.
+
+        Out-of-fold arrays are indexed by the search-subsample rows. When all
+        notebooks share ``search_sample_seed`` every merged array already has
+        this run's length and this is a no-op. If a merged ecosystem was built
+        on a different subsample, its arrays can't be blended -- so the affected
+        models are retrained on this run's subsample to regenerate aligned OOF.
+        Warned once.
+        """
+        controller, scoring_ctx, search_y, search_features = self._require_ready()
+        oof_store = controller.oof_store
+        target_len = len(search_y)
+        stale = [
+            g
+            for g in controller.population.completed()
+            if g.score_set is not None
+            and oof_store.has(g.model_id)
+            and len(oof_store.get(g.model_id)) != target_len
+        ]
+        if not stale:
+            return
+        if not self._warned_oof_mismatch:
+            self._warned_oof_mismatch = True
+            self.log(
+                f"{len(stale)} merged model(s) have OOF from a different search "
+                f"subsample (expected {target_len} rows); recomputing on this "
+                f"run's subsample. Share search_sample_seed across notebooks to "
+                f"avoid this.",
+                level=Verbosity.SUMMARY,
+            )
+        split_seed = self.settings.search_sample_seed
+        splits = make_cv_splits(
+            search_y, n_splits=self.settings.cv_splits, seed=split_seed, task=self._task
+        )
+        for genome in stale:
+            result = controller.trainer.train(
+                genome,
+                train_frame=search_features,
+                y=search_y,
+                splits=splits,
+                ctx=cast(Any, scoring_ctx),
+                task=self._task,
+                seed=self.settings.seed,
+            )
+            if result.status == ModelStatus.COMPLETED and result.oof is not None:
+                oof_store.store(genome.model_id, result.oof)
+                genome.score_set = result.score_set
+            else:
+                # Couldn't realign it -- drop the incompatible OOF so it can't
+                # corrupt a blend; the genome survives as a gene for mutation.
+                oof_store.remove(genome.model_id)
+        controller.population.update_utilities()
+        controller.population.update_elite()
+
     def predict(self, test_df: pd.DataFrame | None = None) -> np.ndarray:
         """Predict test data with the ensemble (refits members on FULL train data)."""
         from concurrent.futures import ThreadPoolExecutor
@@ -508,7 +584,7 @@ class KagglePipeline:
         )
         if test is None:
             raise ValueError("no test data provided to predict()")
-        manager = EnsembleManager(self.settings)
+        manager = EnsembleManager(self.settings, families=self.families)
         # Use a fresh, scoped pool for the submission refit instead of the
         # long-running batch pool: ``make_submission`` (which calls this) is
         # often invoked after ``run()`` 's finally block has already shut the
@@ -667,6 +743,11 @@ class KagglePipeline:
         write new checkpoints into ``self.serializer``'s local dir.
         """
         state = (serializer or self.serializer).load(path)
+        self._install_state(state, strict=strict)
+        return state
+
+    def _install_state(self, state: EcosystemState, *, strict: bool = False) -> None:
+        """Rebuild the controller around an already-loaded (or merged) state."""
         mismatch = check_pipeline_version(state, strict=strict)
         if mismatch:
             logger.warning(mismatch)
@@ -678,6 +759,9 @@ class KagglePipeline:
             n_splits=self.settings.cv_splits,
             seed=self.settings.seed,
         )
+        # Keep the population's OOF view pointed at the live store so pruning
+        # frees the right arrays (rebuild only sets ``controller.oof_store``).
+        self.controller.population.oof_store = self.controller.oof_store
         self._score_history = list(state.score_history)
         self._runtime_history = list(state.runtime_history)
         self.log(
@@ -686,7 +770,6 @@ class KagglePipeline:
             level=Verbosity.SUMMARY,
         )
         self._log_loaded_ecosystem(state)
-        return state
 
     def _log_loaded_ecosystem(self, state: EcosystemState) -> None:
         """Print the full ecosystem summary right after restoring from a checkpoint."""
@@ -702,25 +785,40 @@ class KagglePipeline:
         return self.load_state(path)
 
     def _resume_latest(self) -> None:
-        """Merge the latest saved population/registry into the prepared controller."""
+        """Warm-start the prepared controller from saved state.
+
+        Loads the local checkpoint when continuing this run, otherwise every
+        input ecosystem found under the attached datasets. Multiple inputs are
+        merged into one (best genes kept) before the controller is rebuilt --
+        this is the parallel-train -> blend step. The feature evaluation context
+        is re-attached to the restored registry afterwards.
+        """
         if self.controller is None:
             return
-        load_serializer = pick_resume_serializer(self.serializer, self.settings)
-        if load_serializer is None:
+        states = collect_resume_states(
+            self.serializer,
+            self.settings,
+            log=lambda m: self.log(m, level=Verbosity.NORMAL),
+        )
+        if not states:
             self.log(
                 "resume requested but no checkpoint found; starting fresh", level=Verbosity.SUMMARY
             )
             return
-        if load_serializer is not self.serializer:
-            self.log(
-                f"resuming from previous run at {load_serializer.state_dir}",
-                level=Verbosity.NORMAL,
-            )
         assert self.controller._eval_context is not None and self.controller._eval_y is not None
         eval_frame = self.controller._eval_context.frame
         eval_y = self.controller._eval_y
         task = self.controller._task
-        self.load_state(serializer=load_serializer)
+        state = (
+            merge_ecosystem_states(
+                states,
+                settings=self.settings,
+                log=lambda m: self.log(m, level=Verbosity.NORMAL),
+            )
+            if len(states) > 1
+            else states[0]
+        )
+        self._install_state(state)
         assert self.controller is not None
         # Re-attach the feature evaluation context to the restored registry.
         self.controller.initialize_features([], eval_frame=eval_frame, y=eval_y, task=task)

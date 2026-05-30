@@ -14,6 +14,7 @@ through. New families are added by registering another ``FamilyDefinition``.
 from __future__ import annotations
 
 import importlib.util
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,6 +30,24 @@ from kaggle_pipeline.evolution.genes.parameter_gene import (
 
 # Default estimator counts per fidelity level (a resource gene's values).
 DEFAULT_FIDELITY_N_ESTIMATORS = {1: 120, 2: 300, 3: 600, 4: 900}
+
+# Default per-family floor: keep at least one model of every family alive.
+DEFAULT_MIN_MODELS: int | float = 1
+
+
+def resolve_min_count(min_models: int | float, total: int) -> int:
+    """Resolve a per-family minimum to an absolute count against ``total``.
+
+    An ``int`` is taken literally (an absolute model count); a ``float`` is read
+    as a fraction of ``total`` and rounded **up** (so any positive fraction
+    protects at least one model). The result is clamped to ``[0, total]``.
+    ``bool`` is normalised to its ``int`` value first, since ``bool`` is an
+    ``int`` subclass and would otherwise be mistaken for a count of 0/1.
+    """
+    if isinstance(min_models, bool):
+        min_models = int(min_models)
+    count = math.ceil(min_models * total) if isinstance(min_models, float) else int(min_models)
+    return max(0, min(total, count))
 
 
 def _have(module: str) -> bool:
@@ -56,6 +75,12 @@ class FamilyDefinition:
     # Reach for this on families whose wall-time scales poorly with N (MLP,
     # KNN); leave it ``None`` for multi-threaded GBMs / linear models.
     max_train_rows: int | None = None
+    # Lower bound on how many models of this family survive culling and enter
+    # the ensemble, so a family is never wiped out purely on utility. An ``int``
+    # is an absolute count; a ``float`` is a fraction (of the population cap when
+    # pruning, of the ensemble size when blending), rounded up. The default of
+    # ``1`` keeps the single best model of every family alive.
+    min_models: int | float = DEFAULT_MIN_MODELS
 
     def n_estimators_for(self, fidelity_level: int) -> int:
         levels = self.fidelity_n_estimators
@@ -63,6 +88,10 @@ class FamilyDefinition:
 
     def is_available(self) -> bool:
         return self.available()
+
+    def min_model_count(self, total: int) -> int:
+        """Absolute floor for this family given a relevant ``total`` size."""
+        return resolve_min_count(self.min_models, total)
 
 
 # --- estimator builders ------------------------------------------------------

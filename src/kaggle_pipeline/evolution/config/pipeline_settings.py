@@ -47,6 +47,19 @@ class KagglePipelineSettings:
     make_submission_on_run: bool = True
     submission_path: str = "submission.csv"
 
+    # --- run mode -----------------------------------------------------------
+    # When False, ``run()`` skips the evolutionary batch loop entirely and goes
+    # straight from data prep (including merging any input ecosystems) to
+    # finalization/submission. This is what the "blend-only" notebook uses: it
+    # combines the parallel training outputs and ships a submission without
+    # training any new models. Leave True for the single-thread and
+    # parallel-training notebooks. Together with ``make_submission_on_run`` this
+    # gives the three notebook modes purely via flags:
+    #   single-thread : train_models=True,  make_submission_on_run=True
+    #   parallel-train: train_models=True,  make_submission_on_run=False
+    #   blend-only    : train_models=False, make_submission_on_run=True
+    train_models: bool = True
+
     # --- verbosity ----------------------------------------------------------
     # Default 3 (DETAILED) mirrors the v1 Config's default ``verbosity="verbose"``.
     verbosity: int = 3
@@ -115,6 +128,16 @@ class KagglePipelineSettings:
 
     # --- reproducibility ----------------------------------------------------
     seed: int | None = None
+    # Seed for the *search subsample* only (which rows the search trains/CVs on),
+    # kept separate from ``seed`` (which drives the evolutionary search itself).
+    # It defaults to a fixed value -- not ``None`` -- on purpose: parallel
+    # notebooks that share data and ``search_sample_seed`` draw the *same*
+    # subsample, so their out-of-fold predictions line up row-for-row and can be
+    # blended directly when their ecosystems are merged. Vary ``seed`` (or leave
+    # it ``None``) per parallel notebook so each explores different models while
+    # the subsample stays aligned. If a merged ecosystem's OOF was built on a
+    # different subsample, the blender recomputes it on its own subsample.
+    search_sample_seed: int = 0
 
     def __post_init__(self) -> None:
         if self.max_runtime_seconds <= 0:

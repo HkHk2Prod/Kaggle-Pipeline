@@ -9,6 +9,7 @@ candidates.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -24,6 +25,12 @@ from kaggle_pipeline.evolution.ensemble.weighted import (
     weighted_average,
 )
 from kaggle_pipeline.evolution.evaluation.oof_store import OOFStore
+from kaggle_pipeline.evolution.models.genome import ModelGenome
+from kaggle_pipeline.evolution.models.parameter_spaces import (
+    DEFAULT_MIN_MODELS,
+    FamilyDefinition,
+    resolve_min_count,
+)
 from kaggle_pipeline.evolution.models.registry import ModelPopulation
 from kaggle_pipeline.evolution.utils.logging import get_logger
 
@@ -60,20 +67,65 @@ class EnsembleResult:
 class EnsembleManager:
     """Builds and applies the final ensemble from the model population."""
 
-    def __init__(self, settings: KagglePipelineSettings):
+    def __init__(
+        self,
+        settings: KagglePipelineSettings,
+        *,
+        families: dict[str, FamilyDefinition] | None = None,
+    ):
         self.settings = settings
+        # Per-family floor lookup; families absent here fall back to the default.
+        self.families = families or {}
 
-    def select_candidates(self, population: ModelPopulation, oof_store: OOFStore) -> list[str]:
-        ranking = population.ensemble_candidate_ranking()
+    def _eligible_ranking(
+        self, population: ModelPopulation, oof_store: OOFStore
+    ) -> list[ModelGenome]:
+        """Score-filtered ensemble candidates, best-first (uncapped)."""
         min_score = self.settings.ensemble_candidate_min_score
-        candidates = [
-            g.model_id
-            for g in ranking
+        return [
+            g
+            for g in population.ensemble_candidate_ranking()
             if g.score_set is not None
             and oof_store.has(g.model_id)
             and (min_score is None or g.score_set.score >= min_score)
         ]
-        return candidates[: self.settings.ensemble_max_models]
+
+    def family_min_count(self, family: str) -> int:
+        """Per-family ensemble floor, resolved against ``ensemble_max_models``."""
+        fam = self.families.get(family)
+        spec = fam.min_models if fam is not None else DEFAULT_MIN_MODELS
+        return resolve_min_count(spec, self.settings.ensemble_max_models)
+
+    def _required_members(self, ranking: list[ModelGenome]) -> list[str]:
+        """Each family's top ``min_models`` candidates -- guaranteed a seat."""
+        kept: Counter = Counter()
+        required: list[str] = []
+        for g in ranking:
+            if kept[g.family] < self.family_min_count(g.family):
+                required.append(g.model_id)
+                kept[g.family] += 1
+        return required
+
+    def select_candidates(self, population: ModelPopulation, oof_store: OOFStore) -> list[str]:
+        """Top candidates up to the cap, with each family's floor guaranteed in.
+
+        The cap (``ensemble_max_models``) is filled best-first, but every
+        family's required floor is admitted first -- so a family is never shut
+        out of the blend purely because its models score lower. As with elite
+        protection in pruning, an oversized floor may push the count past the
+        cap rather than evict a required member.
+        """
+        ranking = self._eligible_ranking(population, oof_store)
+        max_models = self.settings.ensemble_max_models
+        selected = self._required_members(ranking)
+        seen = set(selected)
+        for g in ranking:
+            if len(selected) >= max_models:
+                break
+            if g.model_id not in seen:
+                selected.append(g.model_id)
+                seen.add(g.model_id)
+        return selected
 
     def build(
         self,
@@ -95,6 +147,11 @@ class EnsembleManager:
                 oof_by_id[mid] = arr
         strategy = self.settings.ensemble_strategy
         if strategy == "greedy":
+            # Per-family floor members are forced in so greedy can't drop a
+            # family the candidate stage deliberately kept; the candidate set is
+            # already family-balanced, so ``mean``/``weighted`` need no seed.
+            ranked_genomes = [population.get(mid) for mid in candidates]
+            required = [mid for mid in self._required_members(ranked_genomes) if mid in oof_by_id]
             weights, score = greedy_weights(
                 candidates,
                 oof_by_id,
@@ -102,6 +159,7 @@ class EnsembleManager:
                 scoring_fn,
                 max_models=self.settings.ensemble_max_models,
                 min_models=self.settings.ensemble_min_models,
+                required_ids=required,
                 time_left=time_left,
             )
         elif strategy == "weighted":

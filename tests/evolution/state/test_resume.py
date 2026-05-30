@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from kaggle_pipeline.evolution.ecosystem.resume import find_previous_state_dir
+from kaggle_pipeline.evolution.ecosystem.resume import (
+    find_all_state_dirs,
+    find_previous_state_dir,
+)
 
 
 def _make_state(tmp: Path, mtime: float | None = None) -> Path:
@@ -120,3 +123,34 @@ def isolate_kaggle_input(monkeypatch, tmp_path):
 
 def test_default_kaggle_root_used_when_not_passed(isolate_kaggle_input):
     assert find_previous_state_dir(previous_state_dir=None) is None
+
+
+# --- find_all_state_dirs: multi-ecosystem discovery for merging -------------
+def test_find_all_returns_every_input_ecosystem(tmp_path):
+    kaggle_root = tmp_path / "kaggle_input"
+    kaggle_root.mkdir()
+    a = _make_state(kaggle_root / "worker_a" / "kagglepipeline_state", mtime=1_000.0)
+    b = _make_state(kaggle_root / "worker_b" / "kagglepipeline_state", mtime=2_000.0)
+    c = _make_state(kaggle_root / "worker_c" / "kagglepipeline_state", mtime=3_000.0)
+    out = find_all_state_dirs(previous_state_dir=None, kaggle_root=kaggle_root)
+    assert set(out) == {a, b, c}
+    # Newest-checkpoint first.
+    assert out == [c, b, a]
+
+
+def test_find_all_empty_when_nothing_found(tmp_path):
+    assert find_all_state_dirs(previous_state_dir=None, kaggle_root=tmp_path / "nope") == []
+
+
+def test_find_all_explicit_dir_short_circuits(tmp_path):
+    explicit = _make_state(tmp_path / "explicit")
+    out = find_all_state_dirs(previous_state_dir=str(explicit), kaggle_root=tmp_path / "absent")
+    assert out == [explicit]
+
+
+def test_find_all_skips_dirs_without_checkpoints(tmp_path):
+    kaggle_root = tmp_path / "kaggle_input"
+    good = _make_state(kaggle_root / "worker_a" / "kagglepipeline_state")
+    (kaggle_root / "worker_b" / "kagglepipeline_state" / "checkpoints").mkdir(parents=True)
+    out = find_all_state_dirs(previous_state_dir=None, kaggle_root=kaggle_root)
+    assert out == [good]

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Publish this package as a Kaggle Dataset for offline (internet-off) use.
 
-Code competitions disable internet, so ``notebooks/kaggle_runner.ipynb`` cannot
-``pip install`` the package and instead imports it from an attached Kaggle
-Dataset (see that notebook's "Offline use" section). This script automates
+Code competitions disable internet, so the ``notebooks/pipeline_*.ipynb``
+runners cannot ``pip install`` the package and instead import it from an attached
+Kaggle Dataset (see each notebook's "Offline use" section). This script automates
 building / refreshing that dataset from the repo's ``src/`` directory.
 
 It must run somewhere with internet *and* your Kaggle credentials -- your own
