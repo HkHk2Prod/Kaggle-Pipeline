@@ -68,6 +68,31 @@ def test_family_builds_and_fits(family, registry, synthetic):
     np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
 
 
+def test_sgd_early_stopping_silences_convergence_warning():
+    # SGDClassifier capped at max_iter without early stopping warns whenever it
+    # hits the cap before ``tol`` is met. Early stopping must end the fit on a
+    # validation plateau instead, so no ConvergenceWarning escapes.
+    import warnings
+
+    from sklearn.exceptions import ConvergenceWarning
+
+    families = build_default_families()
+    sgd = families["sgd"]
+    rng = np.random.default_rng(0)
+    # Noisy, hard-to-separate data with a tiny alpha forces many iterations.
+    X = rng.normal(size=(2000, 20))
+    y = (rng.normal(size=2000) > 0).astype(int)
+    estimator = sgd.build_estimator(
+        {"alpha": 1e-7, "penalty": "elasticnet"},
+        sgd.n_estimators_for(4),
+        0,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ConvergenceWarning)
+        estimator.fit(X, y)
+    assert estimator.n_iter_ < estimator.max_iter
+
+
 def test_mlp_and_knn_carry_the_train_size_cap():
     families = build_default_families()
     assert families["mlp"].max_train_rows is not None
