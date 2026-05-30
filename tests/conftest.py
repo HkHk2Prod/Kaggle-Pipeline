@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -9,6 +10,21 @@ import pandas as pd
 import pytest
 
 from kaggle_pipeline.config import Config
+
+
+@pytest.fixture(autouse=True)
+def _restore_package_logger_propagation():
+    """Keep ``caplog`` working regardless of test order.
+
+    ``configure_logging`` (invoked by every pipeline run) attaches its own
+    handler to the ``kaggle_pipeline`` logger and sets ``propagate=False``,
+    which silently stops ``caplog`` -- a handler on the root logger -- from
+    capturing package logs in any *later* test. Restoring propagation after each
+    test makes caplog-based assertions order-independent under pytest-randomly.
+    """
+    yield
+    logging.getLogger("kaggle_pipeline").propagate = True
+
 
 N_TRAIN = 200
 N_TEST = 80

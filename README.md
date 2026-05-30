@@ -529,14 +529,16 @@ src/kaggle_pipeline/
 ├── pipeline.py     # run() — the training entry point
 ├── analysis.py     # analyze() — the standalone EDA entry point
 └── cli.py          # `kaggle-pipeline run|analyze --config ...`
-notebooks/          # kaggle_runner.ipynb — the thin notebook to upload to Kaggle
+notebooks/          # three thin runners: pipeline_{single_thread,multi_thread_train,multi_thread_blend}.ipynb (see "Parallel training")
 tests/              # unit + end-to-end smoke tests
 ```
 
 ## Quickstart on Kaggle
 
-Upload [`notebooks/kaggle_runner.ipynb`](notebooks/kaggle_runner.ipynb), or paste
-these cells. Enable **Internet** in the notebook settings.
+Upload [`notebooks/pipeline_single_thread.ipynb`](notebooks/pipeline_single_thread.ipynb)
+(the single-thread runner), or paste these cells. Enable **Internet** in the
+notebook settings. For the parallel train → merge → repeat workflow use the
+`train` and `blend` siblings instead — see [Parallel training](#parallel-training).
 
 ```python
 # 1. Install (pin a tag for reproducibility, e.g. @v0.1.0)
@@ -558,6 +560,36 @@ run(cfg)  # writes submission.csv to /kaggle/working
 For **code competitions with no internet at scoring time**, add the repo as a
 Kaggle Dataset and `sys.path` it instead of `pip install` — see the fallback
 section in the runner notebook.
+
+## Parallel training
+
+Kaggle lets you run several notebooks at once. To exploit that, the search is
+split into a **train → merge → repeat** loop across three sibling notebooks that
+differ only by two flags:
+
+| Notebook | `train_models` | `make_submission_on_run` | Role |
+|---|---|---|---|
+| [`pipeline_single_thread.ipynb`](notebooks/pipeline_single_thread.ipynb) | `True` | `True` | One run: evolve models *and* submit. |
+| [`pipeline_multi_thread_train.ipynb`](notebooks/pipeline_multi_thread_train.ipynb) | `True` | `False` | Parallel worker: evolve models, emit an ecosystem, **no** submission (and no time reserved for one). |
+| [`pipeline_multi_thread_blend.ipynb`](notebooks/pipeline_multi_thread_blend.ipynb) | `False` | `True` | Single process: merge the workers' ecosystems and submit. No new models. |
+
+The cycle: run *n* `train` notebooks in parallel → attach all their outputs to
+one `blend` notebook → it **merges the *n* ecosystems into one** (best genes
+kept, duplicates dropped, so *n* × ~300 models collapse to a single ~300-model
+leaderboard) and ships a submission → the next wave of `train` notebooks resumes
+from that merged ecosystem. Repeat.
+
+Merging is automatic: every notebook passes `resume=True`, which discovers and
+merges **all** input ecosystems found under `/kaggle/input/*` (a single input is
+used as-is). The merge logs each input's size and best score, then the combined
+totals.
+
+Two seeds matter here. Keep **`search_sample_seed` identical** across all
+notebooks: it fixes which rows the search subsample uses, so out-of-fold
+predictions line up row-for-row and can be blended directly. Vary the evolution
+**`seed`** (or leave it `None`) per worker so each explores different models. If
+a merged ecosystem's OOF was built on a different subsample, the blender warns
+once and recomputes it on its own subsample.
 
 ## Local / CLI usage
 
@@ -687,6 +719,14 @@ applied while packaging:
 
 A running checklist of enhancements worth exploring — contributions welcome:
 
+- [ ] **Make the parallel pipeline reproducible.** The parallel train → merge
+  workflow needs each worker notebook to use a *different* evolution `seed` (so
+  they explore different models) while sharing `search_sample_seed` (so their
+  OOF predictions stay blendable). Today divergence relies on leaving `seed`
+  unset (`None`), which is non-reproducible. Find a smart way to derive a
+  distinct-but-deterministic seed per notebook *without* the user pasting one in
+  by hand — e.g. hash the Kaggle kernel/session id, the attached-input set, or a
+  worker index — so a parallel sweep is both divergent and reproducible.
 - [ ] **Check correlations during `add`, not just per batch.** De-correlation
   currently runs as a whole-board pass after each batch
   ([`search/decorrelation.py`](src/kaggle_pipeline/search/decorrelation.py)),
@@ -708,16 +748,13 @@ A running checklist of enhancements worth exploring — contributions welcome:
   on a smaller sample of the training set to evaluate many more candidates per
   unit time, then refit only the leaderboard survivors on the full dataset before
   ensembling.
-- [ ] **Separate NN-on-GPU training cycle behind a flag.** The current MLP family
-  runs single-threaded on CPU, which is why it carries a ``max_train_rows`` cap.
-  Add an opt-in flag (e.g. ``--enable_gpu_nn``) that, after the CPU search has
-  filled the leaderboard with tree/linear/Bayesian models, kicks off a separate
-  GPU-only training cycle that trains *only* neural-net families (a PyTorch
-  family alongside or replacing sklearn's MLP). Search ranks and ensemble slots
-  decide whether the NNs make it in. This way GPU compute is reserved for the
-  one model type that actually benefits from it instead of sitting idle while
-  CPU-friendly GBMs train, and NN quality is not artificially capped by CPU
-  budget.
+- [ ] **A dedicated GPU pipeline with hardware autodetection.** An opt-in,
+  parallel GPU-only training cycle (PyTorch NN family the clear win; GPU GBMs a
+  secondary option) that autodetects the hardware to adapt model parameters,
+  honours Kaggle's separate GPU time/quota limit, and treats GPU-trained
+  predictions as frozen cross-host artifacts (persist, gate recomputation by
+  declared `system_requirements`, reuse freely) so a CPU merge/submit notebook
+  can still blend them. Full design: [docs/gpu-pipeline.md](docs/gpu-pipeline.md).
 
 ## Development
 
@@ -778,6 +815,10 @@ those are pulled in only for the standalone `analyze` flow. Dev extras
   `-q`/`--quiet` override the config value, e.g.
   `kaggle-pipeline run -c config.yaml -v`. Embedders can still configure the
   `kaggle_pipeline` logger directly to redirect or filter output.
+
+## TODO
+
+- [ ] Rework ensembling
 
 ## License
 

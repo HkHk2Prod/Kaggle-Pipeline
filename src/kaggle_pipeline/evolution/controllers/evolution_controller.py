@@ -83,7 +83,11 @@ class EvolutionController:
         self.settings = settings or EvolutionSettings()
         self.families = families or build_default_families()
         self.registry = registry or FeatureRegistry(self.settings)
-        self.population = population or ModelPopulation(self.settings)
+        self.population = population or ModelPopulation(self.settings, families=self.families)
+        # A population handed in (resume / merge) may predate the family-floor
+        # wiring; attach the specs so pruning honours per-family minimums.
+        if not getattr(self.population, "family_min_models", None):
+            self.population.set_family_minimums(self.families)
         self.oof_store = OOFStore()
         # Let the population evict a pruned model's OOF (its only "big" data) while
         # keeping the lightweight genome + scores.

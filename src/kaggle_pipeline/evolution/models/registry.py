@@ -22,6 +22,11 @@ from kaggle_pipeline.evolution.config import EvolutionSettings
 from kaggle_pipeline.evolution.models.genome import ModelGenome
 from kaggle_pipeline.evolution.models.lifecycle import ModelStatus
 from kaggle_pipeline.evolution.models.mutation import MutationRecord
+from kaggle_pipeline.evolution.models.parameter_spaces import (
+    DEFAULT_MIN_MODELS,
+    FamilyDefinition,
+    resolve_min_count,
+)
 from kaggle_pipeline.evolution.models.scoring import ModelUtility, comparable_stats
 from kaggle_pipeline.evolution.utils.logging import get_logger
 from kaggle_pipeline.evolution.utils.random import spawn_rng
@@ -38,11 +43,17 @@ class ModelPopulation:
         *,
         max_active: int = 200,
         elite_size: int = 25,
+        families: dict[str, FamilyDefinition] | None = None,
     ):
         self.settings = settings
         self.utility = ModelUtility(settings)
         self.max_active = max_active
         self.elite_size = elite_size
+        # Per-family floor specs only (not the full catalog -- ``FamilyDefinition``
+        # carries un-picklable estimator/availability lambdas and the population
+        # is checkpointed). Families absent here fall back to ``DEFAULT_MIN_MODELS``
+        # so every family keeps at least its best model with no catalog wired in.
+        self.family_min_models: dict[str, int | float] = {}
         self._by_id: dict[str, ModelGenome] = {}
         self._by_hash: dict[str, str] = {}
         self.active: list[str] = []
@@ -56,6 +67,12 @@ class ModelPopulation:
         # again on resume; ``None`` short-circuits the correlation recompute to
         # zero (the warning still fires once).
         self._search_y: np.ndarray | None = None
+        if families:
+            self.set_family_minimums(families)
+
+    def set_family_minimums(self, families: dict[str, FamilyDefinition]) -> None:
+        """Cache each family's ``min_models`` spec from the catalog (picklable)."""
+        self.family_min_models = {name: fam.min_models for name, fam in families.items()}
 
     def set_search_target(self, y: np.ndarray | None) -> None:
         """Bind the y vector that recomputers use to derive residual penalties.
@@ -165,19 +182,48 @@ class ModelPopulation:
         for mid in self.elite:
             self._by_id[mid].was_elite = True
 
+    def family_min_count(self, family: str) -> int:
+        """Per-family survival floor, resolved against the population cap."""
+        # ``getattr`` guards pickles from before the field existed.
+        specs = getattr(self, "family_min_models", None) or {}
+        spec = specs.get(family, DEFAULT_MIN_MODELS)
+        return resolve_min_count(spec, self.max_active)
+
+    def _family_protected(self, ranked: list[str]) -> set[str]:
+        """The highest-utility ``min_models`` ids of each family in ``ranked``.
+
+        ``ranked`` is already sorted best-first, so walking it and taking the
+        first ``min_count`` ids per family yields each family's strongest
+        survivors -- the ones a per-family floor must shield from pruning.
+        """
+        kept: Counter = Counter()
+        protected: set[str] = set()
+        for mid in ranked:
+            family = self._by_id[mid].family
+            if kept[family] < self.family_min_count(family):
+                protected.add(mid)
+                kept[family] += 1
+        return protected
+
     def prune_active(self) -> None:
-        """Cap the active set, never evicting elites; drop the lowest-utility rest."""
+        """Cap the active set, never evicting elites or a family's floor.
+
+        Lowest-utility models are dropped first, but elites and each family's
+        top ``min_models`` are protected -- so a whole family is never culled to
+        extinction purely on utility. Protected members can push the kept set
+        past ``max_active``, exactly as elites already do.
+        """
         if len(self.active) <= self.max_active:
             return
-        elite = set(self.elite)
         ranked = sorted(
             self.active,
             key=lambda mid: self.effective_utility(self._by_id[mid]),
             reverse=True,
         )
+        protected = set(self.elite) | self._family_protected(ranked)
         keep: list[str] = []
         for mid in ranked:
-            if len(keep) < self.max_active or mid in elite:
+            if len(keep) < self.max_active or mid in protected:
                 keep.append(mid)
             else:
                 self._by_id[mid].status = ModelStatus.PRUNED

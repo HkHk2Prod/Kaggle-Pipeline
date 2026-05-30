@@ -28,12 +28,16 @@ def greedy_weights(
     *,
     max_models: int = 50,
     min_models: int = 2,
+    required_ids: list[str] | None = None,
     time_left: Callable[[], bool] | None = None,
 ) -> tuple[dict[str, float], float]:
     """Return ``(weights, oof_score)`` from greedy forward selection.
 
     ``weights`` maps model id -> normalised weight (selection multiplicity).
     Falls back to the single best candidate if greedy cannot improve.
+    ``required_ids`` seed the selection (each forced in once before the greedy
+    loop) so a per-family floor survives even when those models don't improve
+    the running blend on their own.
     """
     probas = {mid: reconstruct_proba(oof_by_id[mid]) for mid in candidate_ids if mid in oof_by_id}
     ids = list(probas)
@@ -43,11 +47,16 @@ def greedy_weights(
     def score(matrix: np.ndarray) -> float:
         return float(scoring_fn(y, matrix))
 
-    # Seed with the single best model.
+    # Seed with every required member (a per-family floor), plus the single best
+    # model so the blend always contains the top scorer. De-duplicated, capped
+    # at ``max_models`` so a large floor can't blow past the model budget here.
+    seed = [mid for mid in (required_ids or []) if mid in probas]
     best_single = max(ids, key=lambda m: score(probas[m]))
-    selected = [best_single]
-    running = probas[best_single].copy()
-    best_score = score(running)
+    if best_single not in seed:
+        seed.append(best_single)
+    selected = seed[:max_models]
+    running = sum((probas[mid] for mid in selected[1:]), probas[selected[0]].copy())
+    best_score = score(running / len(selected))
 
     while len(selected) < max_models:
         if time_left is not None and not time_left():

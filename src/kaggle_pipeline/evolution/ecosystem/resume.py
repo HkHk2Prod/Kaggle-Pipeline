@@ -30,16 +30,47 @@ def find_previous_state_dir(
     kaggle_root: Path = KAGGLE_INPUT_ROOT,
 ) -> Path | None:
     """Return the state directory of a previous run, or ``None``."""
-    if previous_state_dir is not None:
-        path = Path(previous_state_dir)
-        return path if _has_checkpoints(path) else None
-
-    if not kaggle_root.is_dir():
-        return None
-    candidates = [match for match in kaggle_root.rglob(state_dir_name) if _has_checkpoints(match)]
+    candidates = find_all_state_dirs(
+        previous_state_dir=previous_state_dir,
+        state_dir_name=state_dir_name,
+        kaggle_root=kaggle_root,
+    )
     if not candidates:
         return None
     return max(candidates, key=_latest_checkpoint_mtime)
+
+
+def find_all_state_dirs(
+    *,
+    previous_state_dir: str | Path | None,
+    state_dir_name: str = "kagglepipeline_state",
+    kaggle_root: Path = KAGGLE_INPUT_ROOT,
+) -> list[Path]:
+    """Return *every* resumable state directory, for merging parallel ecosystems.
+
+    Parallel notebooks each emit their own ``state_dir`` as an output; the merge
+    notebook attaches all of them as inputs, so several mount under
+    ``/kaggle/input/``. This returns each distinct one holding a non-empty
+    ``checkpoints/`` folder (newest-checkpoint first). An explicit
+    ``previous_state_dir`` short-circuits to just that directory. Empty when
+    nothing is found.
+    """
+    if previous_state_dir is not None:
+        path = Path(previous_state_dir)
+        return [path] if _has_checkpoints(path) else []
+
+    if not kaggle_root.is_dir():
+        return []
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    for match in kaggle_root.rglob(state_dir_name):
+        resolved = match.resolve()
+        if resolved in seen or not _has_checkpoints(match):
+            continue
+        seen.add(resolved)
+        candidates.append(match)
+    candidates.sort(key=_latest_checkpoint_mtime, reverse=True)
+    return candidates
 
 
 def _has_checkpoints(state_dir: Path) -> bool:

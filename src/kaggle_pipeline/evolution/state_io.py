@@ -8,11 +8,12 @@ thin wrappers around these.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kaggle_pipeline.evolution.ecosystem.resume import find_previous_state_dir
+from kaggle_pipeline.evolution.ecosystem.resume import find_all_state_dirs, find_previous_state_dir
 from kaggle_pipeline.evolution.ecosystem.serialization import EcosystemSerializer
 from kaggle_pipeline.evolution.ecosystem.state import PIPELINE_VERSION, EcosystemState
 from kaggle_pipeline.evolution.ecosystem.summary import build_ecosystem_summary, format_summary
@@ -100,6 +101,35 @@ def pick_resume_serializer(
     if prev is None:
         return None
     return EcosystemSerializer(prev, keep_last_n=settings.keep_last_n_checkpoints)
+
+
+def collect_resume_states(
+    serializer: EcosystemSerializer,
+    settings: KagglePipelineSettings,
+    *,
+    log: Callable[[str], None] | None = None,
+) -> list[EcosystemState]:
+    """Load every ecosystem to warm-start from -- one local, or all inputs to merge.
+
+    A local checkpoint (the run's own ``state_dir``) always wins and is loaded
+    alone: it is an in-progress run being continued, not something to merge. With
+    no local checkpoint, every input ecosystem found under ``/kaggle/input`` (or
+    the explicit ``previous_state_dir``) is loaded so the caller can merge them.
+    Returns ``[]`` when nothing resumable exists.
+    """
+    emit = log or (lambda _msg: None)
+    if serializer.latest_path() is not None:
+        return [serializer.load()]
+    dirs = find_all_state_dirs(
+        previous_state_dir=settings.previous_state_dir,
+        state_dir_name=Path(settings.state_dir).name,
+    )
+    states: list[EcosystemState] = []
+    for state_dir in dirs:
+        loader = EcosystemSerializer(state_dir, keep_last_n=settings.keep_last_n_checkpoints)
+        emit(f"resuming from input ecosystem at {state_dir}")
+        states.append(loader.load())
+    return states
 
 
 def format_loaded_ecosystem(
