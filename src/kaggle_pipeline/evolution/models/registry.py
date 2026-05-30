@@ -158,6 +158,12 @@ class ModelPopulation:
         completed = [g for g in self.completed() if g.score_set is not None]
         completed.sort(key=lambda g: self.effective_adj_score(g, penalty), reverse=True)
         self.elite = [g.model_id for g in completed[: self.elite_size]]
+        # Sticky tag: once a genome makes the leaderboard we mark it so the
+        # end-of-cycle compute summary can distinguish "evicted later" from
+        # "never made it". Older pickles may lack the attribute; ``setattr`` is
+        # safe either way.
+        for mid in self.elite:
+            self._by_id[mid].was_elite = True
 
     def prune_active(self) -> None:
         """Cap the active set, never evicting elites; drop the lowest-utility rest."""

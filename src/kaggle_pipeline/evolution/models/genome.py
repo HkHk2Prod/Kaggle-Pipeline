@@ -54,6 +54,11 @@ class ModelGenome:
     score_set: ModelScoreSet | None = None
     utility: float | None = None
     correlation_penalty: float | None = None
+    # Sticky flag: ``True`` from the first time this genome appears in the
+    # elite list and never reset, so the end-of-cycle compute-waste summary
+    # can tell "made it onto the leaderboard but got evicted" apart from
+    # "never made it at all". Set by ``ModelPopulation.update_elite``.
+    was_elite: bool = False
     # Derived; set in __post_init__.
     genome_hash: str = field(default="", compare=False)
     model_id: str = field(default="", compare=False)
