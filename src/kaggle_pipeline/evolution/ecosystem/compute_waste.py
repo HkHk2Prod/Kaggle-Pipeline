@@ -142,6 +142,11 @@ def format_compute_waste_summary(summary: ComputeWasteSummary) -> str:
         f"compute-waste summary (total measured fit time: "
         f"{summary.grand_total_seconds:.0f}s; "
         f"{len(summary.ensemble_member_ids)} ensemble members)",
+        # Legend so the abbreviated column headers are self-documenting.
+        "  win = in final ensemble    "
+        "part = was on leaderboard, evicted later    "
+        "wst = never on leaderboard",
+        "  new = factory-generated    mut = mutation of an existing model",
         sep,
         header_row,
         sep,

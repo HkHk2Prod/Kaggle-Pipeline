@@ -179,6 +179,17 @@ def test_formatter_renders_table_with_one_row_per_family_summing_to_100pct():
     # All six bucket headers appear.
     for label in ("win:new", "win:mut", "part:new", "part:mut", "wst:new", "wst:mut"):
         assert label in rendered
+    # The legend explains the abbreviations before the table.
+    for legend_term in (
+        "win = in final ensemble",
+        "part = was on leaderboard",
+        "wst = never on leaderboard",
+        "new = factory-generated",
+        "mut = mutation",
+    ):
+        assert legend_term in rendered
+    # Legend appears above the column headers so readers see it first.
+    assert rendered.index("win = in final ensemble") < rendered.index("win:new")
     # The one row covers lightgbm.
     assert "lightgbm" in rendered
     # Win:new is 25% (10s of 40s); waste:mut is 75%.
