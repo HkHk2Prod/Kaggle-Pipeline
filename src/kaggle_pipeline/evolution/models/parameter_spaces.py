@@ -242,8 +242,15 @@ def _build_sgd(params: dict, n_estimators: int, random_state: int | None) -> Any
         loss="log_loss",
         alpha=params.get("alpha", 1e-4),
         penalty=params.get("penalty", "l2"),
+        # ``n_estimators`` is the resource gene's iteration count; like MLP it
+        # caps ``max_iter`` and lets early stopping do the real work, so a slow
+        # learner stops on a validation plateau instead of running to the cap
+        # and emitting a ConvergenceWarning.
         max_iter=max(50, min(int(n_estimators), 300)),
         tol=1e-4,
+        early_stopping=True,
+        validation_fraction=0.1,
+        n_iter_no_change=8,
         learning_rate="optimal",
         class_weight="balanced",
         random_state=random_state,
