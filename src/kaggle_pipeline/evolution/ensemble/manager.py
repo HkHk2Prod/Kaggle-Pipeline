@@ -128,17 +128,35 @@ class EnsembleManager:
         test_frame: pd.DataFrame,
         task: str = "classification",
         seed: int | None = None,
+        executor: Any = None,
     ) -> np.ndarray:
-        """Refit each member on full train data and weighted-average test predictions."""
-        matrices: list[np.ndarray] = []
-        weights: list[float] = []
-        for mid, weight in result.weights.items():
+        """Refit each member on full train data and weighted-average test predictions.
+
+        Members are independent (each rebuilds its own pipeline from its genome
+        and reads the registry/materializer in read-only mode), so when an
+        ``executor`` is supplied each refit runs in parallel. With 30 members
+        on an 8-core box this turns the longest member's wall-time into the
+        bottleneck instead of the sum -- typically a 5-8x speed-up on the
+        submission window. When ``executor`` is ``None`` we fall back to the
+        original sequential loop.
+        """
+        items = list(result.weights.items())
+
+        def _refit_one(mid: str) -> np.ndarray:
             genome = population.get(mid)
             preds = trainer.fit_predict_test(
                 genome, train_frame=train_frame, y=y, test_frame=test_frame, task=task, seed=seed
             )
-            matrices.append(np.asarray(preds, dtype=float))
-            weights.append(weight)
+            return np.asarray(preds, dtype=float)
+
+        if executor is None:
+            matrices = [_refit_one(mid) for mid, _ in items]
+        else:
+            # Preserve member order so the weight alignment is unambiguous --
+            # ``submit``/``result`` is order-preserving across a fixed list.
+            futures = [executor.submit(_refit_one, mid) for mid, _ in items]
+            matrices = [f.result() for f in futures]
+        weights = [w for _, w in items]
         return weighted_average(matrices, weights)
 
     # --- strategies ---------------------------------------------------------

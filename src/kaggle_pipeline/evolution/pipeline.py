@@ -515,6 +515,7 @@ class KagglePipeline:
             test_frame=test,
             task=self._task,
             seed=self.settings.seed,
+            executor=self.scheduler.model_pool(),
         )
 
     def _submission_writer(self) -> SubmissionWriter:
